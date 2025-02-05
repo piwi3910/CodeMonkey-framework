@@ -17,6 +17,19 @@ export enum MemoryImportance {
   Critical = 4,
 }
 
+export enum MemoryType {
+  Observation = 'observation',      // Direct observations
+  Inference = 'inference',          // Derived insights
+  Decision = 'decision',            // Past decisions
+  Knowledge = 'knowledge',          // Learned information
+  Experience = 'experience',        // Task experiences
+  Feedback = 'feedback',           // User feedback
+  Error = 'error',                 // Past mistakes
+  Success = 'success',             // Successful outcomes
+  Collaboration = 'collaboration',  // Team interactions
+  Context = 'context',             // Environmental context
+}
+
 export interface Memory {
   id: string;
   content: string;
@@ -38,19 +51,6 @@ export interface MemoryMetadata {
   agentId: string;
   taskId?: string;
   projectId: string;
-}
-
-export enum MemoryType {
-  Observation = 'observation',      // Direct observations
-  Inference = 'inference',          // Derived insights
-  Decision = 'decision',            // Past decisions
-  Knowledge = 'knowledge',          // Learned information
-  Experience = 'experience',        // Task experiences
-  Feedback = 'feedback',           // User feedback
-  Error = 'error',                 // Past mistakes
-  Success = 'success',             // Successful outcomes
-  Collaboration = 'collaboration',  // Team interactions
-  Context = 'context',             // Environmental context
 }
 
 export interface ConsolidationRule {

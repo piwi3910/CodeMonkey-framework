@@ -80,6 +80,7 @@ export enum LearningEventType {
   UserFeedback = 'user_feedback',
   CollaborationSuccess = 'collaboration_success',
   CollaborationFailure = 'collaboration_failure',
+  CollaborationActivity = 'collaboration_activity',
   ErrorRecovery = 'error_recovery',
   PerformanceImprovement = 'performance_improvement',
 }

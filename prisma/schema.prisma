@@ -107,3 +107,42 @@ model LearningMetric {
   data      String
   timestamp DateTime        @default(now())
 }
+
+// Collaboration System Models
+model CollaborationSession {
+  id           String                  @id @default(uuid())
+  type         String
+  status       String
+  context      String
+  workflow     String
+  protocol     String
+  metrics      String?
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  participants CollaborationParticipant[]
+  messages     CollaborationMessage[]
+}
+
+model CollaborationParticipant {
+  id           String               @id @default(uuid())
+  sessionId    String
+  session      CollaborationSession @relation(fields: [sessionId], references: [id])
+  agentId      String
+  role         String
+  status       String
+  contribution String?
+  feedback     String?
+  timestamp    DateTime
+}
+
+model CollaborationMessage {
+  id          String               @id @default(uuid())
+  sessionId   String
+  session     CollaborationSession @relation(fields: [sessionId], references: [id])
+  senderId    String
+  recipientId String?
+  type        String
+  content     String
+  metadata    String
+  createdAt   DateTime             @default(now())
+}

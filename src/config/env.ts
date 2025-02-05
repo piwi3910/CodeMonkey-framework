@@ -24,9 +24,10 @@ const envSchema = z.object({
   CLAUDE_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENROUTER_API_KEY: z.string().optional(),
+  OLLAMA_BASE_URL: z.string().optional(),
   
   // Default provider settings
-  DEFAULT_PROVIDER: z.enum(['claude', 'openai', 'openrouter']).default('claude'),
+  DEFAULT_PROVIDER: z.enum(['claude', 'openai', 'openrouter', 'ollama']).default('claude'),
   DEFAULT_MODEL: z.string().default('claude-3-opus-20240229'),
   
   // Agent settings
@@ -79,6 +80,9 @@ export const config = {
     },
     openrouter: {
       apiKey: env.data.OPENROUTER_API_KEY,
+    },
+    ollama: {
+      baseUrl: env.data.OLLAMA_BASE_URL,
     },
   },
   

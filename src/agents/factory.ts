@@ -13,6 +13,7 @@ import { LLMProvider } from '../providers/base';
 import { ClaudeProvider } from '../providers/claude';
 import { OpenAIProvider } from '../providers/openai';
 import { OpenRouterProvider } from '../providers/openrouter';
+import { OllamaProvider } from '../providers/ollama';
 import { ChromaProvider } from '../providers/chroma';
 import { config } from '../config/env';
 
@@ -168,6 +169,12 @@ export class AgentFactory {
         return new OpenRouterProvider({
           apiKey: config.llm.openrouter.apiKey,
           modelName: model,
+        });
+
+      case 'ollama':
+        return new OllamaProvider({
+          modelName: model,
+          baseUrl: config.llm.ollama?.baseUrl,
         });
 
       default:

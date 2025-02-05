@@ -8,6 +8,7 @@ export interface LearningMetrics {
   executionTime: number;  // milliseconds
   resourceUsage: number;  // 0-1 score of resource efficiency
   userFeedback: number;  // -1 to 1 score from user feedback
+  collaborationScore?: number;  // 0-1 score for collaboration effectiveness
   timestamp: Date;
 }
 
@@ -29,7 +30,7 @@ export interface Specialization {
   requiredSkills: string[];  // IDs of required skills
   level: number;  // Specialization level (0-100)
   progress: number;  // Progress to next level (0-100)
-  unlockedAt: Date;
+  unlockedAt: Date | null;  // When the specialization was unlocked
 }
 
 export interface LearningProfile {
@@ -67,6 +68,7 @@ export enum SkillCategory {
   Architecture = 'architecture',
   Testing = 'testing',
   DevOps = 'devops',
+  Collaboration = 'collaboration',
 }
 
 export enum LearningEventType {

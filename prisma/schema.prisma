@@ -1,0 +1,127 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String   @id @default(uuid())
+  name        String
+  description String
+  repository  String?
+  status      String   // planning, in_progress, review, completed, archived
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  agents      Agent[]
+  tasks       Task[]
+  context     ProjectContext?
+  conversations Conversation[]
+
+  @@map("projects")
+}
+
+model Agent {
+  id           String   @id @default(uuid())
+  name         String
+  role         String   // project_manager, architect, frontend_developer, etc.
+  provider     String   // LLM provider identifier
+  systemPrompt String   // System prompt for the agent
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId    String
+  state        AgentState?
+  messages     Message[]
+  tasks        Task[]   // Tasks assigned to this agent
+
+  @@map("agents")
+}
+
+model AgentState {
+  id           String   @id @default(uuid())
+  currentTask  String?
+  context      String   // JSON stringified context
+  shortTerm    String   // JSON stringified recent messages
+  longTerm     String   // JSON stringified important information
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId      String   @unique
+
+  @@map("agent_states")
+}
+
+model Task {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  status      String   // pending, in_progress, review, completed, blocked
+  priority    String   // low, medium, high, critical
+  dependencies String  @default("[]") // JSON stringified array of task IDs
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+  agent       Agent?   @relation(fields: [agentId], references: [id])
+  agentId     String?
+
+  @@map("tasks")
+}
+
+model ProjectContext {
+  id          String   @id @default(uuid())
+  files       String   // JSON stringified array
+  dependencies String  // JSON stringified object
+  architecture String  // JSON stringified object
+  technical   String   // JSON stringified array
+  requirements String  // JSON stringified array
+  design      String   // JSON stringified array
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String   @unique
+
+  @@map("project_contexts")
+}
+
+model Conversation {
+  id          String   @id @default(uuid())
+  title       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+  messages    Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  role        String   // system, user, assistant, function
+  content     String   // Message content
+  name        String?
+  functionCall String? // JSON stringified function call
+  createdAt   DateTime @default(now())
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String?
+  agent        Agent?    @relation(fields: [agentId], references: [id])
+  agentId      String?
+
+  @@map("messages")
+}
+
+// Vector store references will be managed in ChromaDB
+// Cache entries will be managed in Redis

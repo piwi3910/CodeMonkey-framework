@@ -1,12 +1,4 @@
-// Agent Types
-export type AgentRole =
-  | 'project_manager'
-  | 'architect'
-  | 'frontend_developer'
-  | 'backend_developer'
-  | 'code_reviewer'
-  | 'devops'
-  | 'qa_engineer';
+export type FunctionCallType = 'none' | 'auto' | { name: string };
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'function';
@@ -18,10 +10,6 @@ export interface Message {
   };
 }
 
-// Task Types
-export type TaskStatus = 'pending' | 'assigned' | 'in_progress' | 'completed' | 'failed';
-export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
-
 export interface Task {
   id: string;
   title: string;
@@ -30,78 +18,90 @@ export interface Task {
   priority: TaskPriority;
   dependencies: string[];
   projectId: string;
-  agentId: string | null | undefined;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-// Agent State Types
-export interface AgentState {
-  id: string;
-  agentId: string;
-  context: string;
-  shortTerm: string;
-  longTerm: string;
+  agentId?: string | null;
+  createdAt: Date;
   updatedAt: Date;
 }
 
-// Error Types
-export class FrameworkError extends Error {
-  constructor(
-    message: string,
-    public code: string,
-    public statusCode: number
-  ) {
-    super(message);
-    this.name = 'FrameworkError';
-  }
+export enum TaskStatus {
+  Pending = 'pending',
+  InProgress = 'in_progress',
+  Completed = 'completed',
+  Failed = 'failed',
+  Blocked = 'blocked',
 }
 
-// Documentation Types
+export enum TaskPriority {
+  Low = 'low',
+  Medium = 'medium',
+  High = 'high',
+  Critical = 'critical',
+}
+
 export type DocumentationType = 
-  | 'api' 
-  | 'architecture' 
-  | 'technical' 
-  | 'design'
-  | 'learning_event'
-  | 'skill_data'
-  | 'agent_profile'
-  | 'memory'
   | 'code'
-  | 'test'
+  | 'architecture'
+  | 'requirements'
+  | 'memory'
+  | 'learning'
+  | 'collaboration'
+  | 'technical'
+  | 'api'
   | 'metric'
-  | 'documentation';
+  | 'learning_event';
 
 export interface DocumentationMetadata {
   projectId: string;
-  type: DocumentationType;
-  title: string;
-  timestamp: string;
-  agentId?: string;
+  type?: DocumentationType;
+  nResults?: number;
   category?: string;
-  version?: string;
   tags?: string[];
 }
 
-// Provider Types
+export interface DocumentationResult {
+  content: string;
+  metadata: {
+    title: string;
+    type: DocumentationType;
+    category?: string;
+    tags: string[];
+    timestamp: string;
+    similarity?: number;
+    context?: string;
+  };
+}
+
 export interface ProviderConfig {
-  apiKey?: string;
+  apiKey: string;
   modelName: string;
-  baseUrl?: string;
+  temperature?: number;
+  maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+}
+
+export interface ChatFunction {
+  name: string;
+  description: string;
+  parameters: Record<string, any>;
 }
 
 export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
   stopSequences?: string[];
-  functions?: any[];
-  functionCall?: 'auto' | 'none' | { name: string };
+  functionCall?: FunctionCallType;
+  functions?: ChatFunction[];
 }
 
 export interface ChatResponse {
   id: string;
   content: string;
-  usage: {
+  usage?: {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
@@ -112,92 +112,87 @@ export interface ChatResponse {
   };
 }
 
-// Memory Types
-export interface Memory {
-  id: string;
-  content: string;
-  type: 'shortTerm' | 'longTerm';
-  timestamp: Date;
-  metadata: {
-    source: string;
-    context?: string;
-    importance?: number;
-    category?: string;
+export interface AgentState {
+  context: Record<string, any>;
+  shortTerm: any[];
+  longTerm: any[];
+  currentTask?: string | null;
+}
+
+export interface ProjectContext {
+  architecture: Record<string, any>;
+  technical: Record<string, any>;
+  requirements: Record<string, any>;
+  dependencies: Record<string, any>;
+}
+
+export interface TaskResult {
+  success: boolean;
+  message: string;
+  artifacts?: string[];
+  metrics?: {
+    duration: number;
+    resourceUsage: number;
+    quality: number;
   };
 }
 
-// Context Types
-export interface AgentContext {
-  currentTask?: {
-    id: string;
-    title: string;
-    description: string;
-  };
-  recentMemories: Memory[];
-  projectContext: {
-    architecture?: string;
-    technical?: string;
-    requirements?: string;
-  };
-  customContext?: Record<string, any>;
-}
-
-// Project Types
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  agents: {
-    id: string;
-    name: string;
-    role: AgentRole;
+export interface CodeReviewResult {
+  issues: {
+    file: string;
+    line: number;
+    severity: 'error' | 'warning' | 'info';
+    message: string;
+    suggestion?: string;
   }[];
-  tasks: Task[];
-  context?: {
-    architecture: string;
-    technical: string;
-    requirements: string;
-    dependencies: string;
-  };
+  summary: string;
+  score: number;
+  suggestions: string[];
 }
 
-// Monitoring Types
-export interface PerformanceMetrics {
-  responseTime: number;
-  tokenUsage: number;
-  memoryUsage: number;
-  taskSuccess: boolean;
-  errorCount: number;
-  timestamp: Date;
-}
-
-export interface SystemHealth {
-  status: 'healthy' | 'degraded' | 'failing';
-  components: {
-    name: string;
-    status: 'up' | 'down' | 'degraded';
-    lastCheck: Date;
-    metrics?: Record<string, number>;
-  }[];
-  lastUpdated: Date;
-}
-
-// Function Calling Types
-export interface FunctionDefinition {
-  name: string;
+export interface ImprovementSuggestion {
+  category: 'performance' | 'security' | 'maintainability' | 'architecture';
+  priority: 'low' | 'medium' | 'high';
   description: string;
-  parameters: {
-    type: 'object';
-    properties: Record<string, {
-      type: string;
-      description: string;
-      enum?: string[];
-    }>;
-    required?: string[];
-  };
+  impact: string;
+  effort: string;
+  implementation?: string;
 }
 
-export interface FunctionCall {
-  name: string;
-  arguments: string;
+// Provider-specific configs
+export interface ClaudeConfig extends ProviderConfig {
+  organizationId?: string;
+  stopSequences?: string[];
+}
+
+export interface OpenAIConfig extends ProviderConfig {
+  organization?: string;
+  stopSequences?: string[];
+}
+
+export interface OpenRouterConfig extends ProviderConfig {
+  routePreference?: string;
+  stopSequences?: string[];
+}
+
+export interface OllamaConfig extends ProviderConfig {
+  baseUrl?: string;
+  stopSequences?: string[];
+}
+
+// Provider-specific chat options
+export interface ClaudeChatOptions extends ChatOptions {
+  organizationId?: string;
+}
+
+export interface OpenAIChatOptions extends ChatOptions {
+  organization?: string;
+}
+
+export interface OpenRouterChatOptions extends ChatOptions {
+  routePreference?: string;
+}
+
+export interface OllamaChatOptions extends ChatOptions {
+  baseUrl?: string;
 }

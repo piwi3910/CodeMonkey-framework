@@ -28,6 +28,8 @@ export enum MemoryType {
   Success = 'success',             // Successful outcomes
   Collaboration = 'collaboration',  // Team interactions
   Context = 'context',             // Environmental context
+  ShortTerm = 'short_term',        // Short-term memory
+  LongTerm = 'long_term',          // Long-term memory
 }
 
 export interface Memory {

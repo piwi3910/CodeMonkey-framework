@@ -1,14 +1,14 @@
 import { PrismaClient } from '@prisma/client';
 import { ChromaProvider } from '../providers/chroma';
 import { OpenAIProvider } from '../providers/openai';
-import { BaseAgent } from './base';
-import { ProjectManager } from './project-manager';
-import { Architect } from './architect';
-import { FrontendDeveloper } from './frontend-developer';
-import { BackendDeveloper } from './backend-developer';
-import { CodeReviewer } from './code-reviewer';
-import { DevOps } from './devops';
-import { QAEngineer } from './qa-engineer';
+import { BaseAgent, AgentData } from './base';
+import { ProjectManagerAgent } from './project-manager';
+import { ArchitectAgent } from './architect';
+import { FrontendDeveloperAgent } from './frontend-developer';
+import { BackendDeveloperAgent } from './backend-developer';
+import { CodeReviewerAgent } from './code-reviewer';
+import { DevOpsAgent } from './devops';
+import { QAEngineerAgent } from './qa-engineer';
 
 export type AgentRole =
   | 'project_manager'
@@ -45,17 +45,34 @@ export class AgentFactory {
         model: config.model,
         systemPrompt: this.getSystemPrompt(config.role),
       },
-    });
-
-    // Create learning profile
-    await this.prisma.learningProfile.create({
-      data: {
-        agentId: agent.id,
+      include: {
+        project: true,
+        learningProfile: true,
+        state: true,
       },
     });
 
+    // Create learning profile if it doesn't exist
+    if (!agent.learningProfile) {
+      await this.prisma.learningProfile.create({
+        data: {
+          agentId: agent.id,
+        },
+      });
+    }
+
     // Create agent instance
-    return this.instantiateAgent(agent);
+    const agentData: AgentData = {
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      projectId: agent.projectId,
+      provider: agent.provider,
+      model: agent.model,
+      systemPrompt: agent.systemPrompt,
+    };
+
+    return this.instantiateAgent(agentData);
   }
 
   private getSystemPrompt(role: AgentRole): string {
@@ -79,30 +96,22 @@ export class AgentFactory {
     }
   }
 
-  private instantiateAgent(data: {
-    id: string;
-    name: string;
-    role: string;
-    projectId: string;
-    provider: string;
-    model: string;
-    systemPrompt: string;
-  }): BaseAgent {
+  private instantiateAgent(data: AgentData): BaseAgent {
     switch (data.role) {
       case 'project_manager':
-        return new ProjectManager(data, this.prisma, this.chroma, this.llm);
+        return new ProjectManagerAgent(data, this.prisma, this.chroma, this.llm);
       case 'architect':
-        return new Architect(data, this.prisma, this.chroma, this.llm);
+        return new ArchitectAgent(data, this.prisma, this.chroma, this.llm);
       case 'frontend_developer':
-        return new FrontendDeveloper(data, this.prisma, this.chroma, this.llm);
+        return new FrontendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
       case 'backend_developer':
-        return new BackendDeveloper(data, this.prisma, this.chroma, this.llm);
+        return new BackendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
       case 'code_reviewer':
-        return new CodeReviewer(data, this.prisma, this.chroma, this.llm);
+        return new CodeReviewerAgent(data, this.prisma, this.chroma, this.llm);
       case 'devops':
-        return new DevOps(data, this.prisma, this.chroma, this.llm);
+        return new DevOpsAgent(data, this.prisma, this.chroma, this.llm);
       case 'qa_engineer':
-        return new QAEngineer(data, this.prisma, this.chroma, this.llm);
+        return new QAEngineerAgent(data, this.prisma, this.chroma, this.llm);
       default:
         throw new Error(`Unknown agent role: ${data.role}`);
     }

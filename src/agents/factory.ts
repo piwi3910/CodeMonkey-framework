@@ -2,13 +2,12 @@ import { PrismaClient } from '@prisma/client';
 import { ChromaProvider } from '../providers/chroma';
 import { OpenAIProvider } from '../providers/openai';
 import { BaseAgent, AgentData } from './base';
-import { ProjectManagerAgent } from './project-manager';
-import { ArchitectAgent } from './architect';
-import { FrontendDeveloperAgent } from './frontend-developer';
-import { BackendDeveloperAgent } from './backend-developer';
-import { CodeReviewerAgent } from './code-reviewer';
-import { DevOpsAgent } from './devops';
-import { QAEngineerAgent } from './qa-engineer';
+import { FrontendDeveloperAgent } from './implementations/frontend-developer';
+
+// Import other implementations as they're created
+// import { BackendDeveloperAgent } from './implementations/backend-developer';
+// import { ArchitectAgent } from './implementations/architect';
+// etc.
 
 export type AgentRole =
   | 'project_manager'
@@ -44,6 +43,15 @@ export class AgentFactory {
         provider: config.provider,
         model: config.model,
         systemPrompt: this.getSystemPrompt(config.role),
+        learningProfile: {
+          create: {
+            totalTasks: 0,
+            successfulTasks: 0,
+            failedTasks: 0,
+            averageMetrics: '{}',
+            learningRate: 1,
+          },
+        },
       },
       include: {
         project: true,
@@ -52,20 +60,11 @@ export class AgentFactory {
       },
     });
 
-    // Create learning profile if it doesn't exist
-    if (!agent.learningProfile) {
-      await this.prisma.learningProfile.create({
-        data: {
-          agentId: agent.id,
-        },
-      });
-    }
-
     // Create agent instance
     const agentData: AgentData = {
       id: agent.id,
       name: agent.name,
-      role: agent.role,
+      role: agent.role as AgentRole,
       projectId: agent.projectId,
       provider: agent.provider,
       model: agent.model,
@@ -97,6 +96,11 @@ export class AgentFactory {
   }
 
   private instantiateAgent(data: AgentData): BaseAgent {
+    // For now, return FrontendDeveloperAgent for all roles until other implementations are ready
+    return new FrontendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
+
+    // TODO: Uncomment and implement other agent types
+    /*
     switch (data.role) {
       case 'project_manager':
         return new ProjectManagerAgent(data, this.prisma, this.chroma, this.llm);
@@ -115,5 +119,6 @@ export class AgentFactory {
       default:
         throw new Error(`Unknown agent role: ${data.role}`);
     }
+    */
   }
 }

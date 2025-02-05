@@ -7,24 +7,10 @@ import {
 import { BaseCommandHandler, CommandBuilder } from '../registry';
 import { AgentFactory, AgentConfig, AgentRole } from '../../agents/factory';
 import { LearningManager } from '../../learning/manager';
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { ChromaProvider } from '../../providers/chroma';
 import { OpenAIProvider } from '../../providers/openai';
 import { config } from '../../config/env';
-
-type AgentWithRelations = Prisma.AgentGetPayload<{
-  include: {
-    project: true;
-    learningProfile: {
-      include: {
-        skills: true;
-        specializations: true;
-        metrics: true;
-      };
-    };
-    state: true;
-  };
-}>;
 
 export class AgentCommandHandler extends BaseCommandHandler {
   constructor(
@@ -81,10 +67,10 @@ export class AgentCommandHandler extends BaseCommandHandler {
     return this.formatResult({
       message: 'Agent created successfully',
       agent: {
-        id: agent.id,
-        name: agent.name,
-        role: agent.role,
-        projectId: agent.projectId,
+        id: agent.getId(),
+        name: agent.getName(),
+        role: agent.getRole(),
+        projectId: agent.getProjectId(),
       },
     });
   }
@@ -140,7 +126,7 @@ export class AgentCommandHandler extends BaseCommandHandler {
         },
         state: true,
       },
-    }) as AgentWithRelations | null;
+    });
 
     if (!agent) {
       return this.formatError(`Agent not found: ${id}`);
@@ -284,98 +270,4 @@ export class AgentCommandHandler extends BaseCommandHandler {
     if (difference < -0.1) return 'declining';
     return 'stable';
   }
-}
-
-// Register commands
-export function registerAgentCommands(registry: any): void {
-  const handler = new AgentCommandHandler(
-    new PrismaClient(),
-    new AgentFactory(
-      new PrismaClient(),
-      new ChromaProvider(),
-      new OpenAIProvider({
-        apiKey: config.llm.openai.apiKey || '',
-        modelName: config.llm.openai.model || 'gpt-4',
-      })
-    ),
-    new LearningManager(
-      new PrismaClient(),
-      new ChromaProvider(),
-      new OpenAIProvider({
-        apiKey: config.llm.openai.apiKey || '',
-        modelName: config.llm.openai.model || 'gpt-4',
-      })
-    )
-  );
-
-  // Create agent command
-  registry.registerCommand(
-    new CommandBuilder()
-      .setCommand('agent')
-      .setSubCommand('create')
-      .setDescription('Create a new agent')
-      .addOption({
-        name: 'name',
-        description: 'Agent name',
-        type: 'string',
-        required: true,
-      })
-      .addOption({
-        name: 'role',
-        description: 'Agent role',
-        type: 'string',
-        required: true,
-        choices: [
-          'project_manager',
-          'architect',
-          'frontend_developer',
-          'backend_developer',
-          'code_reviewer',
-          'devops',
-          'qa_engineer',
-        ],
-      })
-      .addOption({
-        name: 'project',
-        description: 'Project ID',
-        type: 'string',
-        required: true,
-      })
-      .addOption({
-        name: 'provider',
-        description: 'LLM provider',
-        type: 'string',
-        required: true,
-        choices: ['openai', 'claude', 'openrouter', 'ollama'],
-      })
-      .addOption({
-        name: 'model',
-        description: 'LLM model name',
-        type: 'string',
-        required: true,
-      })
-      .addExample('codemonkey agent create --name "Frontend Dev" --role frontend_developer --project my-project --provider openai --model gpt-4')
-      .build(),
-    handler
-  );
-
-  // List agents command
-  registry.registerCommand(
-    new CommandBuilder()
-      .setCommand('agent')
-      .setSubCommand('list')
-      .setDescription('List all agents')
-      .addOption({
-        name: 'project',
-        description: 'Filter by project ID',
-        type: 'string',
-        required: false,
-      })
-      .addExample('codemonkey agent list')
-      .addExample('codemonkey agent list --project my-project')
-      .build(),
-    handler
-  );
-
-  // Other commands...
 }

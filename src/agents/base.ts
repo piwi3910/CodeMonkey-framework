@@ -1,7 +1,18 @@
 import { PrismaClient } from '@prisma/client';
 import { ChromaProvider } from '../providers/chroma';
 import { OpenAIProvider } from '../providers/openai';
-import { Message } from '../types';
+import { 
+  Message, 
+  Task, 
+  TaskResult,
+  TaskStatus,
+  TaskPriority,
+  CodeReviewResult,
+  ImprovementSuggestion,
+  DocumentationType,
+  AgentState,
+  ProjectContext,
+} from '../types';
 
 export interface AgentData {
   id: string;
@@ -37,7 +48,7 @@ export abstract class BaseAgent {
     this.systemPrompt = data.systemPrompt;
   }
 
-  // Public getters for agent properties
+  // Public getters
   public getId(): string {
     return this.id;
   }
@@ -66,13 +77,94 @@ export abstract class BaseAgent {
     return this.systemPrompt;
   }
 
-  // Core agent functionality
-  abstract chat(messages: Message[]): Promise<string>;
-  abstract handleTask(taskId: string): Promise<void>;
-  abstract reviewCode(filePath: string): Promise<string>;
-  abstract suggestImprovements(context: string): Promise<string>;
+  // Core functionality
+  public abstract chat(messages: Message[]): Promise<string>;
 
-  // State management
+  public async handleTask(taskId: string): Promise<TaskResult> {
+    const dbTask = await this.prisma.task.findUnique({
+      where: { id: taskId },
+    });
+
+    if (!dbTask) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+
+    const task: Task = {
+      id: dbTask.id,
+      title: dbTask.title,
+      description: dbTask.description,
+      status: dbTask.status as TaskStatus,
+      priority: dbTask.priority as TaskPriority,
+      dependencies: JSON.parse(dbTask.dependencies),
+      projectId: dbTask.projectId,
+      agentId: dbTask.agentId,
+      createdAt: dbTask.createdAt,
+      updatedAt: dbTask.updatedAt,
+    };
+
+    try {
+      // Update task status
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { status: TaskStatus.InProgress },
+      });
+
+      // Load agent state
+      await this.loadState();
+
+      // Execute task
+      const result = await this.executeTask(task);
+
+      // Update task status based on result
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: {
+          status: result.success ? TaskStatus.Completed : TaskStatus.Failed,
+        },
+      });
+
+      // Record task outcome
+      if (result.success) {
+        await this.recordSuccess(taskId);
+      } else {
+        await this.recordFailure(taskId);
+      }
+
+      return result;
+    } catch (error) {
+      // Handle task failure
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { status: TaskStatus.Failed },
+      });
+
+      await this.recordFailure(taskId);
+
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  public abstract reviewCode(filePath: string): Promise<CodeReviewResult>;
+
+  public abstract suggestImprovements(context: string): Promise<ImprovementSuggestion[]>;
+
+  // Protected helper methods
+  protected abstract executeTask(task: Task): Promise<TaskResult>;
+
+  protected formatSystemPrompt(context?: Record<string, any>): string {
+    let prompt = this.systemPrompt;
+
+    if (context) {
+      // Add context to system prompt
+      prompt += '\n\nContext:\n' + JSON.stringify(context, null, 2);
+    }
+
+    return prompt;
+  }
+
   protected async loadState(): Promise<void> {
     const state = await this.prisma.agentState.findUnique({
       where: { agentId: this.id },
@@ -90,95 +182,135 @@ export abstract class BaseAgent {
     }
   }
 
-  protected async saveState(
-    context: string,
-    shortTerm: string,
-    longTerm: string
-  ): Promise<void> {
+  protected async getState(): Promise<AgentState> {
+    const state = await this.prisma.agentState.findUnique({
+      where: { agentId: this.id },
+    });
+
+    if (!state) {
+      throw new Error('Agent state not found');
+    }
+
+    return {
+      context: JSON.parse(state.context),
+      shortTerm: JSON.parse(state.shortTerm),
+      longTerm: JSON.parse(state.longTerm),
+      currentTask: state.currentTask,
+    };
+  }
+
+  protected async saveState(state: AgentState): Promise<void> {
     await this.prisma.agentState.update({
       where: { agentId: this.id },
       data: {
-        context,
-        shortTerm,
-        longTerm,
+        context: JSON.stringify(state.context),
+        shortTerm: JSON.stringify(state.shortTerm),
+        longTerm: JSON.stringify(state.longTerm),
+        currentTask: state.currentTask,
       },
     });
   }
 
-  // Memory management
-  protected async memorize(
-    content: string,
-    type: 'shortTerm' | 'longTerm',
-    metadata: Record<string, any>
-  ): Promise<void> {
-    await this.chroma.addMemory(content, {
-      source: this.role,
-      type: type === 'shortTerm' ? 'short_term' : 'long_term',
-      tags: [this.role, type],
-      relatedMemories: [],
-      agentId: this.id,
-      projectId: this.projectId,
-    });
-  }
-
-  protected async recall(
-    query: string,
-    type?: 'shortTerm' | 'longTerm'
-  ): Promise<string[]> {
-    const memories = await this.chroma.findRelevantMemories(query, {
-      agentId: this.id,
-      projectId: this.projectId,
-      type: type ? (type === 'shortTerm' ? 'short_term' : 'long_term') : undefined,
-    });
-
-    return memories.map(m => m.content);
-  }
-
-  // Learning management
-  protected async recordSuccess(taskId: string): Promise<void> {
-    // Record successful task completion
-    await this.prisma.learningProfile.update({
-      where: { agentId: this.id },
-      data: {
-        totalTasks: { increment: 1 },
-        successfulTasks: { increment: 1 },
-      },
-    });
-  }
-
-  protected async recordFailure(taskId: string): Promise<void> {
-    // Record task failure
-    await this.prisma.learningProfile.update({
-      where: { agentId: this.id },
-      data: {
-        totalTasks: { increment: 1 },
-        failedTasks: { increment: 1 },
-      },
-    });
-  }
-
-  // Utility methods
-  protected async getProjectContext(): Promise<Record<string, any>> {
+  protected async getProjectContext(): Promise<ProjectContext> {
     const context = await this.prisma.projectContext.findUnique({
       where: { projectId: this.projectId },
     });
 
-    return context ? {
+    if (!context) {
+      throw new Error('Project context not found');
+    }
+
+    return {
       architecture: JSON.parse(context.architecture),
       technical: JSON.parse(context.technical),
       requirements: JSON.parse(context.requirements),
       dependencies: JSON.parse(context.dependencies),
-    } : {};
+    };
   }
 
   protected async updateProjectContext(
-    key: 'architecture' | 'technical' | 'requirements' | 'dependencies',
+    key: keyof ProjectContext,
     value: Record<string, any>
   ): Promise<void> {
     await this.prisma.projectContext.update({
       where: { projectId: this.projectId },
       data: {
         [key]: JSON.stringify(value),
+      },
+    });
+  }
+
+  protected async memorize(
+    content: string,
+    type: DocumentationType,
+    metadata: Record<string, any>
+  ): Promise<void> {
+    await this.chroma.addDocumentation(content, {
+      projectId: this.projectId,
+      type,
+      title: `Memory: ${type}`,
+      timestamp: new Date().toISOString(),
+      tags: [type, this.role, ...Object.keys(metadata)],
+      ...metadata,
+    });
+  }
+
+  protected async recall(
+    query: string,
+    type?: DocumentationType,
+    limit?: number
+  ): Promise<string[]> {
+    const results = await this.chroma.findRelevantDocumentation(query, {
+      projectId: this.projectId,
+      type,
+      nResults: limit,
+    });
+
+    return results.map(r => r.content);
+  }
+
+  private async recordSuccess(taskId: string): Promise<void> {
+    await this.prisma.agent.update({
+      where: { id: this.id },
+      data: {
+        learningProfile: {
+          upsert: {
+            create: {
+              totalTasks: 1,
+              successfulTasks: 1,
+              failedTasks: 0,
+              averageMetrics: '{}',
+              learningRate: 1,
+            },
+            update: {
+              totalTasks: { increment: 1 },
+              successfulTasks: { increment: 1 },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  private async recordFailure(taskId: string): Promise<void> {
+    await this.prisma.agent.update({
+      where: { id: this.id },
+      data: {
+        learningProfile: {
+          upsert: {
+            create: {
+              totalTasks: 1,
+              successfulTasks: 0,
+              failedTasks: 1,
+              averageMetrics: '{}',
+              learningRate: 1,
+            },
+            update: {
+              totalTasks: { increment: 1 },
+              failedTasks: { increment: 1 },
+            },
+          },
+        },
       },
     });
   }

@@ -3,6 +3,7 @@ import { Redis } from 'ioredis';
 import { LLMProvider } from '../providers/base';
 import { AgentRole, AgentState, Message, Task } from '../types';
 import { config } from '../config/env';
+import { ChromaProvider } from '../providers/chroma';
 
 interface AgentMemory {
   shortTerm: Message[];
@@ -13,10 +14,14 @@ interface AgentContext {
   [key: string]: unknown;
 }
 
+const REDIS_STATE_TTL = config.agent.memoryTtl;
+const REDIS_STATE_PREFIX = 'agent:state:';
+
 export abstract class BaseAgent {
   protected prisma: PrismaClient;
   protected redis: Redis;
   protected llm: LLMProvider;
+  protected chroma: ChromaProvider;
   protected state: {
     currentTask?: string;
     context: AgentContext;
@@ -30,11 +35,13 @@ export abstract class BaseAgent {
     protected projectId: string,
     prisma: PrismaClient,
     redis: Redis,
-    llm: LLMProvider
+    llm: LLMProvider,
+    chroma: ChromaProvider
   ) {
     this.prisma = prisma;
     this.redis = redis;
     this.llm = llm;
+    this.chroma = chroma;
     this.state = {
       currentTask: undefined,
       context: {},
@@ -52,6 +59,15 @@ export abstract class BaseAgent {
 
   // State management
   protected async loadState(): Promise<void> {
+    // Try to get state from Redis first
+    const cachedState = await this.redis.get(this.getRedisStateKey());
+    
+    if (cachedState) {
+      this.state = JSON.parse(cachedState);
+      return;
+    }
+
+    // If not in Redis, load from database
     const agentState = await this.prisma.agentState.findUnique({
       where: { agentId: this.id },
     });
@@ -65,10 +81,14 @@ export abstract class BaseAgent {
           longTerm: JSON.parse(agentState.longTerm) as Message[],
         },
       };
+
+      // Cache the state in Redis
+      await this.cacheState();
     }
   }
 
   protected async saveState(): Promise<void> {
+    // Save to database
     await this.prisma.agentState.upsert({
       where: { agentId: this.id },
       update: {
@@ -85,10 +105,26 @@ export abstract class BaseAgent {
         longTerm: JSON.stringify(this.state.memory.longTerm),
       },
     });
+
+    // Update Redis cache
+    await this.cacheState();
+  }
+
+  private async cacheState(): Promise<void> {
+    await this.redis.setex(
+      this.getRedisStateKey(),
+      REDIS_STATE_TTL,
+      JSON.stringify(this.state)
+    );
+  }
+
+  private getRedisStateKey(): string {
+    return `${REDIS_STATE_PREFIX}${this.id}`;
   }
 
   // Memory management
   protected async addToMemory(message: Message, type: 'shortTerm' | 'longTerm'): Promise<void> {
+    // Add to local state
     const memoryArray = this.state.memory[type];
     memoryArray.push(message);
 
@@ -99,6 +135,17 @@ export abstract class BaseAgent {
         this.state.memory.shortTerm = memoryArray.slice(-maxShortTermMemory);
       }
     }
+
+    // Add to ChromaDB for vector search
+    await this.chroma.addMemory(
+      message.content,
+      {
+        agentId: this.id,
+        projectId: this.projectId,
+        type,
+        timestamp: new Date().toISOString(),
+      }
+    );
     
     await this.saveState();
   }
@@ -155,14 +202,21 @@ export abstract class BaseAgent {
   }
 
   protected async getRelevantMemories(query: string): Promise<Message[]> {
-    // Combine short-term and long-term memories
-    const allMemories: Message[] = [
-      ...this.state.memory.shortTerm,
-      ...this.state.memory.longTerm,
-    ];
-    
-    // In a real implementation, we would use vector similarity search
-    // For now, just return recent messages
-    return allMemories.slice(-5);
+    // Use ChromaDB for semantic search
+    const relevantMemories = await this.chroma.findRelevantMemories(query, {
+      agentId: this.id,
+      projectId: this.projectId,
+      nResults: 5,
+    });
+
+    // Convert ChromaDB documents back to messages
+    return relevantMemories.map(doc => {
+      const metadata = doc.metadata;
+      return {
+        role: 'assistant',
+        content: doc.content,
+        timestamp: metadata.timestamp,
+      };
+    });
   }
 }

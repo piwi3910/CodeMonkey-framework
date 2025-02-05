@@ -2,6 +2,7 @@ import { PrismaClient, Task as PrismaTask } from '@prisma/client';
 import { Redis } from 'ioredis';
 import { BaseAgent } from './base';
 import { LLMProvider } from '../providers/base';
+import { ChromaProvider } from '../providers/chroma';
 import { Message, Task, TaskStatus } from '../types';
 
 export class ArchitectAgent extends BaseAgent {
@@ -11,9 +12,10 @@ export class ArchitectAgent extends BaseAgent {
     projectId: string,
     prisma: PrismaClient,
     redis: Redis,
-    llm: LLMProvider
+    llm: LLMProvider,
+    chroma: ChromaProvider
   ) {
-    super(id, name, 'architect', projectId, prisma, redis, llm);
+    super(id, name, 'architect', projectId, prisma, redis, llm, chroma);
   }
 
   async processMessage(message: Message): Promise<Message> {
@@ -47,17 +49,27 @@ export class ArchitectAgent extends BaseAgent {
   async handleTask(task: Task): Promise<void> {
     await this.assignTask(task);
 
-    // Update context with current task
     await this.updateContext('currentTask', {
       id: task.id,
       title: task.title,
       description: task.description,
     });
 
+    // Get relevant architectural context
+    const archContext = await this.getArchitecturalContext(task);
+    if (archContext) {
+      await this.updateContext('architecturalContext', archContext);
+    }
+
     // Process architectural task
     const taskMessage: Message = {
       role: 'system',
-      content: `Please analyze and provide architectural guidance for: ${task.title}\n${task.description}`,
+      content: `Please analyze and provide architectural guidance for:
+Task: ${task.title}
+Description: ${task.description}
+
+Current architectural context:
+${archContext || 'No architectural context available'}`,
     };
 
     const response = await this.processMessage(taskMessage);
@@ -91,15 +103,39 @@ export class ArchitectAgent extends BaseAgent {
       return;
     }
 
+    // Get relevant architectural history
+    const archHistory = await this.chroma.findRelevantDocumentation(
+      'architecture design decisions technical',
+      {
+        projectId: this.projectId,
+        type: 'architecture',
+        nResults: 5,
+      }
+    );
+
     // Analyze and prioritize architectural decisions
     const analysisPrompt: Message = {
       role: 'system',
       content: `Please analyze these pending architectural decisions and prioritize them:
-${pendingDecisions.map((task) => `- ${task.title}\n  ${task.description}`).join('\n')}`,
+${pendingDecisions.map((task) => `- ${task.title}\n  ${task.description}`).join('\n')}
+
+Previous architectural decisions:
+${archHistory.map(doc => doc.content).join('\n\n')}`,
     };
 
     const analysis = await this.processMessage(analysisPrompt);
     await this.updateContext('architecturalPriorities', analysis.content);
+
+    // Store analysis in ChromaDB
+    await this.chroma.addDocumentation(
+      analysis.content,
+      {
+        projectId: this.projectId,
+        type: 'architecture',
+        title: 'Architectural Analysis',
+        timestamp: new Date().toISOString(),
+      }
+    );
 
     // Create subtasks for implementation
     for (const decision of pendingDecisions) {
@@ -116,6 +152,22 @@ ${pendingDecisions.map((task) => `- ${task.title}\n  ${task.description}`).join(
       return 'No project context available.';
     }
 
+    // Get relevant architectural documentation
+    const archDocs = await this.chroma.findRelevantDocumentation(
+      'architecture design technical',
+      {
+        projectId: this.projectId,
+        type: 'architecture',
+        nResults: 3,
+      }
+    );
+
+    const docs = archDocs.length > 0
+      ? '\n\nRelevant Architectural Decisions:\n' + archDocs
+          .map(doc => `${doc.metadata.title}\n${doc.content}`)
+          .join('\n\n')
+      : '';
+
     return `
 Project Architecture:
 ${projectContext.architecture}
@@ -125,7 +177,28 @@ ${projectContext.technical}
 
 Dependencies:
 ${projectContext.dependencies}
+${docs}
     `;
+  }
+
+  private async getArchitecturalContext(task: Task): Promise<string | null> {
+    // Use ChromaDB to find relevant architectural decisions
+    const relevantDocs = await this.chroma.findRelevantDocumentation(
+      `${task.title}\n${task.description}`,
+      {
+        projectId: this.projectId,
+        type: 'architecture',
+        nResults: 5,
+      }
+    );
+
+    if (relevantDocs.length === 0) {
+      return null;
+    }
+
+    return relevantDocs
+      .map((doc) => `${doc.metadata.title}\n\n${doc.content}`)
+      .join('\n\n');
   }
 
   private async processArchitecturalDecisions(message: Message): Promise<void> {
@@ -148,7 +221,18 @@ ${projectContext.dependencies}
     decision: string;
     taskId?: string;
   }): Promise<void> {
-    // Update project context with the new architectural decision
+    // Store in ChromaDB for vector search
+    await this.chroma.addDocumentation(
+      decision.decision,
+      {
+        projectId: this.projectId,
+        type: 'architecture',
+        title: `Architectural Decision: ${decision.title}`,
+        timestamp: new Date().toISOString(),
+      }
+    );
+
+    // Update project context
     const projectContext = await this.prisma.projectContext.findUnique({
       where: { projectId: this.projectId },
     });
@@ -171,11 +255,23 @@ ${projectContext.dependencies}
   }
 
   private async createImplementationTasks(decision: PrismaTask): Promise<void> {
+    // Get relevant implementation context
+    const implContext = await this.chroma.findRelevantDocumentation(
+      `implementation ${decision.title} ${decision.description}`,
+      {
+        projectId: this.projectId,
+        nResults: 3,
+      }
+    );
+
     const implementationPrompt: Message = {
       role: 'system',
       content: `Please break down this architectural decision into implementation tasks:
 Decision: ${decision.title}
-${decision.description}`,
+${decision.description}
+
+Relevant context:
+${implContext.map(doc => doc.content).join('\n\n')}`,
     };
 
     const response = await this.processMessage(implementationPrompt);
@@ -191,6 +287,17 @@ ${decision.description}`,
         dependencies: JSON.stringify([decision.id]),
       },
     });
+
+    // Store implementation plan in ChromaDB
+    await this.chroma.addDocumentation(
+      response.content,
+      {
+        projectId: this.projectId,
+        type: 'technical',
+        title: `Implementation Plan: ${decision.title}`,
+        timestamp: new Date().toISOString(),
+      }
+    );
   }
 
   private getArchitectPrompt(projectContext: string): string {

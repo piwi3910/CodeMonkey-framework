@@ -12,7 +12,7 @@ export abstract class LLMProvider {
   abstract stream(
     messages: Message[],
     options?: ChatOptions
-  ): AsyncIterator<ChatResponse>;
+  ): AsyncIterable<ChatResponse>;
 
   protected validateConfig(): void {
     if (!this.config.modelName) {

@@ -21,7 +21,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "prepare": "husky install",
-    "precommit": "lint-staged",
+    "pre-commit": "lint-staged",
     "clean": "rimraf dist coverage docs",
     "check-types": "tsc --noEmit",
     "validate": "npm run lint && npm run format:check && npm run check-types && npm run test",

@@ -3,16 +3,32 @@ import { Redis } from 'ioredis';
 import { BaseAgent } from './base';
 import { ProjectManagerAgent } from './project-manager';
 import { ArchitectAgent } from './architect';
+import { FrontendDeveloperAgent } from './frontend-developer';
+import { BackendDeveloperAgent } from './backend-developer';
+import { CodeReviewerAgent } from './code-reviewer';
+import { DevOpsAgent } from './devops';
+import { QAEngineerAgent } from './qa-engineer';
 import { AgentRole, FrameworkError } from '../types';
 import { LLMProvider } from '../providers/base';
 import { ClaudeProvider } from '../providers/claude';
+import { OpenAIProvider } from '../providers/openai';
+import { OpenRouterProvider } from '../providers/openrouter';
+import { ChromaProvider } from '../providers/chroma';
 import { config } from '../config/env';
 
 export class AgentFactory {
+  private chroma: ChromaProvider;
+
   constructor(
     private prisma: PrismaClient,
     private redis: Redis
-  ) {}
+  ) {
+    this.chroma = new ChromaProvider();
+  }
+
+  async initialize(): Promise<void> {
+    await this.chroma.initialize();
+  }
 
   async createAgent(
     role: AgentRole,
@@ -69,38 +85,37 @@ export class AgentFactory {
   ): Promise<BaseAgent> {
     const llmProvider = await this.createLLMProvider();
 
+    const commonArgs = [
+      id,
+      name,
+      projectId,
+      this.prisma,
+      this.redis,
+      llmProvider,
+      this.chroma,
+    ] as const;
+
     switch (role) {
       case 'project_manager':
-        return new ProjectManagerAgent(
-          id,
-          name,
-          projectId,
-          this.prisma,
-          this.redis,
-          llmProvider
-        );
+        return new ProjectManagerAgent(...commonArgs);
 
       case 'architect':
-        return new ArchitectAgent(
-          id,
-          name,
-          projectId,
-          this.prisma,
-          this.redis,
-          llmProvider
-        );
+        return new ArchitectAgent(...commonArgs);
 
-      // Add other agent types here as they are implemented
       case 'frontend_developer':
+        return new FrontendDeveloperAgent(...commonArgs);
+
       case 'backend_developer':
+        return new BackendDeveloperAgent(...commonArgs);
+
       case 'code_reviewer':
+        return new CodeReviewerAgent(...commonArgs);
+
       case 'devops':
+        return new DevOpsAgent(...commonArgs);
+
       case 'qa_engineer':
-        throw new FrameworkError(
-          `Agent role ${role} not yet implemented`,
-          'AGENT_NOT_IMPLEMENTED',
-          501
-        );
+        return new QAEngineerAgent(...commonArgs);
 
       default:
         throw new FrameworkError(
@@ -112,20 +127,56 @@ export class AgentFactory {
   }
 
   private async createLLMProvider(): Promise<LLMProvider> {
-    // For now, we're just using Claude as the default provider
-    // In the future, this could be expanded to support multiple providers
-    if (!config.llm.claude.apiKey) {
-      throw new FrameworkError(
-        'Claude API key not configured',
-        'MISSING_API_KEY',
-        500
-      );
-    }
+    const provider = config.llm.defaultProvider;
+    const model = config.llm.defaultModel;
 
-    return new ClaudeProvider({
-      apiKey: config.llm.claude.apiKey,
-      modelName: config.llm.defaultModel as any, // Type assertion since we know it's a valid Claude model
-    });
+    switch (provider) {
+      case 'claude':
+        if (!config.llm.claude.apiKey) {
+          throw new FrameworkError(
+            'Claude API key not configured',
+            'MISSING_API_KEY',
+            500
+          );
+        }
+        return new ClaudeProvider({
+          apiKey: config.llm.claude.apiKey,
+          modelName: model as any,
+        });
+
+      case 'openai':
+        if (!config.llm.openai.apiKey) {
+          throw new FrameworkError(
+            'OpenAI API key not configured',
+            'MISSING_API_KEY',
+            500
+          );
+        }
+        return new OpenAIProvider({
+          apiKey: config.llm.openai.apiKey,
+          modelName: model,
+        });
+
+      case 'openrouter':
+        if (!config.llm.openrouter.apiKey) {
+          throw new FrameworkError(
+            'OpenRouter API key not configured',
+            'MISSING_API_KEY',
+            500
+          );
+        }
+        return new OpenRouterProvider({
+          apiKey: config.llm.openrouter.apiKey,
+          modelName: model,
+        });
+
+      default:
+        throw new FrameworkError(
+          `Unknown provider: ${provider}`,
+          'INVALID_PROVIDER',
+          400
+        );
+    }
   }
 
   private getDefaultSystemPrompt(role: AgentRole): string {

@@ -22,16 +22,25 @@ export class ClaudeProvider extends LLMProvider {
     this.validateOptions(options);
 
     const anthropicMessages = this.convertToAnthropicMessages(messages);
+    const systemMessage = this.extractSystemMessage(messages);
 
     try {
-      const response = await this.client.messages.create({
+      const params: Anthropic.MessageCreateParamsNonStreaming = {
         model: this.config.modelName,
         messages: anthropicMessages,
-        max_tokens: options?.maxTokens,
-        temperature: options?.temperature,
-        system: this.extractSystemMessage(messages),
+        max_tokens: options?.maxTokens || 1024,
         stream: false,
-      });
+      };
+
+      if (systemMessage) {
+        params.system = systemMessage;
+      }
+
+      if (options?.temperature !== undefined) {
+        params.temperature = options.temperature;
+      }
+
+      const response = await this.client.messages.create(params);
 
       return {
         id: response.id,
@@ -50,27 +59,49 @@ export class ClaudeProvider extends LLMProvider {
   async *stream(
     messages: Message[],
     options?: ChatOptions
-  ): AsyncIterator<ChatResponse> {
+  ): AsyncIterable<ChatResponse> {
     this.validateMessages(messages);
     this.validateOptions(options);
 
     const anthropicMessages = this.convertToAnthropicMessages(messages);
+    const systemMessage = this.extractSystemMessage(messages);
 
     try {
-      const stream = await this.client.messages.create({
+      const params: Anthropic.MessageCreateParamsStreaming = {
         model: this.config.modelName,
         messages: anthropicMessages,
-        max_tokens: options?.maxTokens,
-        temperature: options?.temperature,
-        system: this.extractSystemMessage(messages),
+        max_tokens: options?.maxTokens || 1024,
         stream: true,
-      });
+      };
 
-      for await (const chunk of stream) {
-        if (chunk.type === 'message_delta') {
+      if (systemMessage) {
+        params.system = systemMessage;
+      }
+
+      if (options?.temperature !== undefined) {
+        params.temperature = options.temperature;
+      }
+
+      const stream = await this.client.messages.create(params);
+
+      if (!('iterator' in stream)) {
+        throw new Error('Expected streaming response');
+      }
+
+      let currentMessageId = '';
+
+      for await (const event of stream) {
+        if (event.type === 'message_start') {
+          currentMessageId = event.message.id;
+        } else if (event.type === 'content_block_delta' && event.delta.text) {
           yield {
-            id: chunk.id,
-            content: chunk.delta?.text || '',
+            id: currentMessageId,
+            content: event.delta.text,
+            usage: {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+            },
           };
         }
       }
@@ -79,7 +110,9 @@ export class ClaudeProvider extends LLMProvider {
     }
   }
 
-  private convertToAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
+  private convertToAnthropicMessages(
+    messages: Message[]
+  ): Array<Anthropic.MessageParam> {
     return messages
       .filter((msg) => msg.role !== 'system')
       .map((msg) => ({

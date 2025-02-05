@@ -2,6 +2,7 @@ import { PrismaClient, Task as PrismaTask } from '@prisma/client';
 import { Redis } from 'ioredis';
 import { BaseAgent } from './base';
 import { LLMProvider } from '../providers/base';
+import { ChromaProvider } from '../providers/chroma';
 import { Message, Task, TaskStatus, TaskPriority } from '../types';
 
 export class ProjectManagerAgent extends BaseAgent {
@@ -11,41 +12,35 @@ export class ProjectManagerAgent extends BaseAgent {
     projectId: string,
     prisma: PrismaClient,
     redis: Redis,
-    llm: LLMProvider
+    llm: LLMProvider,
+    chroma: ChromaProvider
   ) {
-    super(id, name, 'project_manager', projectId, prisma, redis, llm);
+    super(id, name, 'project_manager', projectId, prisma, redis, llm, chroma);
   }
 
   async processMessage(message: Message): Promise<Message> {
-    // Add message to short-term memory
     await this.addToMemory(message, 'shortTerm');
 
-    // Get relevant context from memory
     const relevantMemories = await this.getRelevantMemories(message.content);
+    const projectContext = await this.getProjectContext();
     
-    // Prepare conversation history
     const conversationHistory: Message[] = [
       {
         role: 'system',
-        content: this.getProjectManagerPrompt(),
+        content: this.getProjectManagerPrompt(projectContext),
       },
       ...relevantMemories,
       message,
     ];
 
-    // Get response from LLM
     const response = await this.llm.chat(conversationHistory);
 
-    // Create response message
     const responseMessage: Message = {
       role: 'assistant',
       content: response.content,
     };
 
-    // Add response to memory
     await this.addToMemory(responseMessage, 'shortTerm');
-
-    // Check for any actions in the response
     await this.processActions(responseMessage);
 
     return responseMessage;
@@ -54,7 +49,6 @@ export class ProjectManagerAgent extends BaseAgent {
   async handleTask(task: Task): Promise<void> {
     await this.assignTask(task);
 
-    // Update context with current task
     await this.updateContext('currentTask', {
       id: task.id,
       title: task.title,
@@ -72,7 +66,6 @@ export class ProjectManagerAgent extends BaseAgent {
   }
 
   async planNextAction(): Promise<void> {
-    // Get all pending tasks
     const prismaTasks = await this.prisma.task.findMany({
       where: {
         projectId: this.projectId,
@@ -104,14 +97,61 @@ export class ProjectManagerAgent extends BaseAgent {
     // Update project context with the plan
     await this.updateContext('currentPlan', plan.content);
 
+    // Store plan in ChromaDB for future reference
+    await this.chroma.addDocumentation(
+      plan.content,
+      {
+        projectId: this.projectId,
+        type: 'technical',
+        title: 'Project Plan',
+        timestamp: new Date().toISOString(),
+      }
+    );
+
     // Assign tasks based on the plan
     for (const task of pendingTasks) {
       await this.assignTaskToAgent(task);
     }
   }
 
+  private async getProjectContext(): Promise<string> {
+    const projectContext = await this.prisma.projectContext.findUnique({
+      where: { projectId: this.projectId },
+    });
+
+    if (!projectContext) {
+      return 'No project context available.';
+    }
+
+    // Get relevant documentation from ChromaDB
+    const relevantDocs = await this.chroma.findRelevantDocumentation(
+      'project plan technical requirements architecture',
+      {
+        projectId: this.projectId,
+        nResults: 3,
+      }
+    );
+
+    const docs = relevantDocs.length > 0
+      ? '\n\nRelevant Documentation:\n' + relevantDocs
+          .map(doc => `${doc.metadata.title}\n${doc.content}`)
+          .join('\n\n')
+      : '';
+
+    return `
+Project Architecture:
+${projectContext.architecture}
+
+Technical Documentation:
+${projectContext.technical}
+
+Requirements:
+${projectContext.requirements}
+${docs}
+    `;
+  }
+
   private async assignTaskToAgent(task: Task): Promise<void> {
-    // Get available agents
     const agents = await this.prisma.agent.findMany({
       where: {
         projectId: this.projectId,
@@ -125,19 +165,30 @@ export class ProjectManagerAgent extends BaseAgent {
       return;
     }
 
-    // Prepare prompt to decide which agent should handle the task
+    // Get relevant task history from ChromaDB
+    const taskHistory = await this.chroma.findRelevantDocumentation(
+      `${task.title}\n${task.description}`,
+      {
+        projectId: this.projectId,
+        nResults: 3,
+      }
+    );
+
     const assignmentPrompt: Message = {
       role: 'system',
       content: `Please assign this task to the most appropriate agent:
 Task: ${task.title}
 Description: ${task.description}
+
 Available agents:
-${agents.map((agent) => `- ${agent.name} (${agent.role})`).join('\n')}`,
+${agents.map((agent) => `- ${agent.name} (${agent.role})`).join('\n')}
+
+Relevant task history:
+${taskHistory.map(doc => doc.content).join('\n\n')}`,
     };
 
     const response = await this.processMessage(assignmentPrompt);
 
-    // Parse the response to get the chosen agent
     const chosenAgent = agents.find((agent) =>
       response.content.toLowerCase().includes(agent.role.toLowerCase())
     );
@@ -150,15 +201,23 @@ ${agents.map((agent) => `- ${agent.name} (${agent.role})`).join('\n')}`,
           status: 'assigned' as TaskStatus,
         },
       });
+
+      // Store assignment decision in ChromaDB
+      await this.chroma.addDocumentation(
+        `Task "${task.title}" assigned to ${chosenAgent.name} (${chosenAgent.role})\n\nReasoning:\n${response.content}`,
+        {
+          projectId: this.projectId,
+          type: 'technical',
+          title: `Task Assignment: ${task.title}`,
+          timestamp: new Date().toISOString(),
+        }
+      );
     }
   }
 
   private async processActions(message: Message): Promise<void> {
-    // In a real implementation, we would parse the message for specific actions
-    // and handle them accordingly (e.g., creating new tasks, updating priorities)
     if (message.content.toLowerCase().includes('create task')) {
-      // Example of creating a new task based on message content
-      await this.prisma.task.create({
+      const task = await this.prisma.task.create({
         data: {
           projectId: this.projectId,
           title: 'New task from PM',
@@ -168,10 +227,21 @@ ${agents.map((agent) => `- ${agent.name} (${agent.role})`).join('\n')}`,
           dependencies: '[]',
         },
       });
+
+      // Store task creation in ChromaDB
+      await this.chroma.addDocumentation(
+        `Task created:\nTitle: ${task.title}\nDescription: ${task.description}`,
+        {
+          projectId: this.projectId,
+          type: 'technical',
+          title: `Task Creation: ${task.title}`,
+          timestamp: new Date().toISOString(),
+        }
+      );
     }
   }
 
-  private getProjectManagerPrompt(): string {
+  private getProjectManagerPrompt(projectContext: string): string {
     return `${this.formatSystemPrompt()}
 
 As a Project Manager agent, your responsibilities include:
@@ -182,6 +252,9 @@ As a Project Manager agent, your responsibilities include:
 5. Ensuring project goals are met
 
 Current project context:
+${projectContext}
+
+Current agent context:
 ${JSON.stringify(this.state.context, null, 2)}
 
 Please provide clear, actionable responses and always consider the project's overall goals.`;

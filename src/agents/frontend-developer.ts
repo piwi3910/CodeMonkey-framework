@@ -1,288 +1,191 @@
-import { PrismaClient, Task as PrismaTask } from '@prisma/client';
-import { Redis } from 'ioredis';
-import { BaseAgent } from './base';
-import { LLMProvider } from '../providers/base';
-import { Message, Task, TaskStatus } from '../types';
+import { Sequelize } from 'sequelize';
 import { ChromaProvider } from '../providers/chroma';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import { OpenAIProvider } from '../providers/openai';
+import { AgentData, BaseAgent } from './base';
+import { 
+  Message,
+  Task,
+  TaskResult,
+  CodeReviewResult,
+  ImprovementSuggestion,
+  TaskStatus,
+} from '../types';
+import { Task as TaskModel } from '../models';
 
 export class FrontendDeveloperAgent extends BaseAgent {
   constructor(
-    id: string,
-    name: string,
-    projectId: string,
-    prisma: PrismaClient,
-    redis: Redis,
-    llm: LLMProvider,
-    chroma: ChromaProvider
+    data: AgentData,
+    sequelize: Sequelize,
+    chroma: ChromaProvider,
+    llm: OpenAIProvider
   ) {
-    super(id, name, 'frontend_developer', projectId, prisma, redis, llm, chroma);
+    super(data, sequelize, chroma, llm);
   }
 
-  async processMessage(message: Message): Promise<Message> {
-    await this.addToMemory(message, 'shortTerm');
+  public async chat(messages: Message[]): Promise<string> {
+    const context = await this.getProjectContext();
+    const state = await this.getState();
 
-    const relevantMemories = await this.getRelevantMemories(message.content);
-    const projectContext = await this.getProjectContext();
-    
-    const conversationHistory: Message[] = [
-      {
-        role: 'system',
-        content: this.getFrontendDevPrompt(projectContext),
-      },
-      ...relevantMemories,
-      message,
-    ];
-
-    const response = await this.llm.chat(conversationHistory);
-
-    const responseMessage: Message = {
-      role: 'assistant',
-      content: response.content,
-    };
-
-    await this.addToMemory(responseMessage, 'shortTerm');
-    await this.processCodeChanges(responseMessage);
-
-    return responseMessage;
-  }
-
-  async handleTask(task: Task): Promise<void> {
-    await this.assignTask(task);
-
-    await this.updateContext('currentTask', {
-      id: task.id,
-      title: task.title,
-      description: task.description,
+    const systemPrompt = this.formatSystemPrompt({
+      ...context,
+      state,
     });
 
-    // Analyze task requirements
-    const analysisPrompt: Message = {
-      role: 'system',
-      content: `Please analyze this frontend development task and break it down into steps:
-Task: ${task.title}
-Description: ${task.description}`,
-    };
+    const response = await this.llm.chat([
+      { role: 'system', content: systemPrompt },
+      ...messages,
+    ]);
 
-    const analysis = await this.processMessage(analysisPrompt);
-    await this.updateContext('taskAnalysis', analysis.content);
-
-    // Get existing code context if available
-    const codeContext = await this.getCodeContext(task);
-    if (codeContext) {
-      await this.updateContext('codeContext', codeContext);
-    }
-
-    // Generate implementation plan
-    const planPrompt: Message = {
-      role: 'system',
-      content: `Based on the analysis and code context, please create an implementation plan:
-Analysis: ${analysis.content}
-Code Context: ${codeContext || 'No existing code context'}`,
-    };
-
-    const plan = await this.processMessage(planPrompt);
-    await this.updateContext('implementationPlan', plan.content);
-
-    // Execute the implementation plan
-    await this.executeImplementation(task, plan.content);
-
-    await this.completeTask(task.id);
+    return response.content;
   }
 
-  async planNextAction(): Promise<void> {
-    const pendingTasks = await this.prisma.task.findMany({
-      where: {
-        projectId: this.projectId,
-        status: 'pending',
-        OR: [
-          { title: { contains: 'frontend' } },
-          { title: { contains: 'ui' } },
-          { title: { contains: 'ux' } },
-          { description: { contains: 'frontend' } },
-          { description: { contains: 'ui' } },
-          { description: { contains: 'ux' } },
-        ],
-      },
+  public async reviewCode(filePath: string): Promise<CodeReviewResult> {
+    const context = await this.getProjectContext();
+    const fileContent = await this.readFile(filePath);
+
+    const systemPrompt = this.formatSystemPrompt({
+      ...context,
+      filePath,
+      fileContent,
     });
 
-    if (pendingTasks.length === 0) {
-      return;
-    }
+    const response = await this.llm.chat([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Review the code in ${filePath} for frontend best practices, accessibility, and performance.` },
+    ]);
 
-    // Analyze and prioritize frontend tasks
-    const analysisPrompt: Message = {
-      role: 'system',
-      content: `Please analyze these pending frontend tasks and prioritize them:
-${pendingTasks.map((task) => `- ${task.title}\n  ${task.description}`).join('\n')}`,
+    const review: CodeReviewResult = {
+      issues: [],
+      suggestions: [],
+      score: 0,
+      summary: '',
     };
 
-    const analysis = await this.processMessage(analysisPrompt);
-    await this.updateContext('frontendPriorities', analysis.content);
-
-    // Create implementation subtasks
-    for (const task of pendingTasks) {
-      await this.createImplementationTasks(task);
-    }
-  }
-
-  private async getProjectContext(): Promise<string> {
-    const projectContext = await this.prisma.projectContext.findUnique({
-      where: { projectId: this.projectId },
-    });
-
-    if (!projectContext) {
-      return 'No project context available.';
-    }
-
-    return `
-Project Architecture:
-${projectContext.architecture}
-
-Technical Documentation:
-${projectContext.technical}
-
-Design Requirements:
-${projectContext.design}
-    `;
-  }
-
-  private async getCodeContext(task: Task): Promise<string | null> {
-    // Use ChromaDB to find relevant code
-    const relevantCode = await this.chroma.findSimilarCode(
-      `${task.title}\n${task.description}`,
-      {
-        projectId: this.projectId,
-        nResults: 3,
-      }
-    );
-
-    if (relevantCode.length === 0) {
-      return null;
-    }
-
-    return relevantCode
-      .map((doc) => `File: ${doc.metadata.filePath}\n\n${doc.content}`)
-      .join('\n\n');
-  }
-
-  private async processCodeChanges(message: Message): Promise<void> {
-    // Extract code blocks and file paths from the message
-    const codeBlocks = message.content.match(/```[\s\S]*?```/g) || [];
-    
-    for (const block of codeBlocks) {
-      const fileMatch = block.match(/```(\w+)\s*([^\n]*)\n([\s\S]*?)```/);
-      if (fileMatch) {
-        const [, language, filePath, code] = fileMatch;
-        if (filePath && code) {
-          await this.storeCodeChange({
-            filePath,
-            language,
-            code: code.trim(),
-            taskId: this.state.currentTask,
-          });
+    try {
+      const parsedResponse = JSON.parse(response.content);
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        if (Array.isArray(parsedResponse.issues)) {
+          review.issues = parsedResponse.issues;
+        }
+        if (Array.isArray(parsedResponse.suggestions)) {
+          review.suggestions = parsedResponse.suggestions;
+        }
+        if (typeof parsedResponse.score === 'number') {
+          review.score = parsedResponse.score;
+        }
+        if (typeof parsedResponse.summary === 'string') {
+          review.summary = parsedResponse.summary;
         }
       }
+    } catch (error) {
+      console.error('Failed to parse code review response:', error);
+      review.summary = response.content;
     }
+
+    return review;
   }
 
-  private async storeCodeChange(change: {
-    filePath: string;
-    language: string;
-    code: string;
-    taskId?: string;
-  }): Promise<void> {
-    // Store in ChromaDB for vector search
-    await this.chroma.addCodeDocument(change.code, {
-      filePath: change.filePath,
-      language: change.language,
-      projectId: this.projectId,
-      taskId: change.taskId,
+  public async suggestImprovements(context: string): Promise<ImprovementSuggestion[]> {
+    const projectContext = await this.getProjectContext();
+
+    const systemPrompt = this.formatSystemPrompt({
+      ...projectContext,
+      improvementContext: context,
     });
 
-    // Update project context
-    const projectContext = await this.prisma.projectContext.findUnique({
-      where: { projectId: this.projectId },
-    });
+    const response = await this.llm.chat([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Suggest improvements for the frontend implementation based on the provided context.' },
+    ]);
 
-    if (projectContext) {
-      const technical = JSON.parse(projectContext.technical);
-      technical.codeChanges = technical.codeChanges || [];
-      technical.codeChanges.push({
-        ...change,
-        timestamp: new Date().toISOString(),
-      });
+    const suggestions: ImprovementSuggestion[] = [];
 
-      await this.prisma.projectContext.update({
-        where: { projectId: this.projectId },
-        data: {
-          technical: JSON.stringify(technical),
-        },
-      });
-    }
-  }
-
-  private async executeImplementation(task: Task, plan: string): Promise<void> {
-    // Create implementation prompt with the plan
-    const implementationPrompt: Message = {
-      role: 'system',
-      content: `Please implement the frontend changes according to this plan:
-${plan}
-
-Current task:
-${task.title}
-${task.description}
-
-Please provide the implementation in code blocks with file paths.`,
-    };
-
-    const implementation = await this.processMessage(implementationPrompt);
-    
-    // Process and store the implementation
-    await this.processCodeChanges(implementation);
-  }
-
-  private async createImplementationTasks(task: PrismaTask): Promise<void> {
-    const implementationPrompt: Message = {
-      role: 'system',
-      content: `Please break down this frontend task into specific implementation tasks:
-Task: ${task.title}
-${task.description}`,
-    };
-
-    const response = await this.processMessage(implementationPrompt);
-
-    // Create implementation tasks
-    await this.prisma.task.create({
-      data: {
-        projectId: this.projectId,
-        title: `Implement: ${task.title}`,
+    try {
+      const parsedResponse = JSON.parse(response.content);
+      if (Array.isArray(parsedResponse)) {
+        suggestions.push(...parsedResponse.map(suggestion => ({
+          description: suggestion.description || suggestion,
+          category: this.normalizeCategory(suggestion.category),
+          priority: suggestion.priority || 'medium',
+          effort: suggestion.effort || 'medium',
+          impact: suggestion.impact || 'medium',
+        })));
+      }
+    } catch (error) {
+      console.error('Failed to parse improvement suggestions:', error);
+      suggestions.push({
         description: response.content,
-        status: 'pending' as TaskStatus,
-        priority: task.priority,
-        dependencies: JSON.stringify([task.id]),
-      },
-    });
+        category: 'performance',
+        priority: 'medium',
+        effort: 'medium',
+        impact: 'medium',
+      });
+    }
+
+    return suggestions;
   }
 
-  private getFrontendDevPrompt(projectContext: string): string {
-    return `${this.formatSystemPrompt()}
+  protected async executeTask(task: Task): Promise<TaskResult> {
+    const context = await this.getProjectContext();
+    const state = await this.getState();
 
-As a Frontend Developer agent, your responsibilities include:
-1. Implementing user interfaces and interactions
-2. Writing clean, maintainable frontend code
-3. Following UI/UX design specifications
-4. Ensuring responsive and accessible implementations
-5. Integrating with backend APIs
-6. Writing frontend tests
+    const systemPrompt = this.formatSystemPrompt({
+      ...context,
+      state,
+      task,
+    });
 
-Current project context:
-${projectContext}
+    const response = await this.llm.chat([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: task.description },
+    ]);
 
-Current agent context:
-${JSON.stringify(this.state.context, null, 2)}
+    // Update task status
+    await TaskModel.update(
+      { status: TaskStatus.Completed },
+      { where: { id: task.id } }
+    );
 
-Please provide clear, well-structured frontend implementations with proper file organization and best practices.`;
+    // Update agent state
+    await this.saveState({
+      ...state,
+      currentTask: null,
+      shortTerm: [...state.shortTerm, {
+        type: 'task',
+        id: task.id,
+        description: task.description,
+        result: response.content,
+        timestamp: new Date().toISOString(),
+      }],
+    });
+
+    return {
+      success: true,
+      message: response.content,
+    };
+  }
+
+  private async readFile(filePath: string): Promise<string> {
+    try {
+      const fs = await import('fs/promises');
+      return await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      throw new Error(`Failed to read file ${filePath}: ${error}`);
+    }
+  }
+
+  private normalizeCategory(category?: string): 'performance' | 'security' | 'maintainability' | 'architecture' {
+    switch (category?.toLowerCase()) {
+      case 'performance':
+        return 'performance';
+      case 'security':
+        return 'security';
+      case 'maintainability':
+        return 'maintainability';
+      case 'architecture':
+        return 'architecture';
+      default:
+        return 'maintainability';
+    }
   }
 }

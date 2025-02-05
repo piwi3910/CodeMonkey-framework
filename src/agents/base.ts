@@ -1,18 +1,24 @@
-import { PrismaClient } from '@prisma/client';
+import { Sequelize } from 'sequelize';
 import { ChromaProvider } from '../providers/chroma';
 import { OpenAIProvider } from '../providers/openai';
 import { 
   Message, 
-  Task, 
+  Task,
   TaskResult,
   TaskStatus,
   TaskPriority,
   CodeReviewResult,
   ImprovementSuggestion,
   DocumentationType,
-  AgentState,
-  ProjectContext,
 } from '../types';
+import { Agent, AgentState, Task as TaskModel, Project, ProjectContext } from '../models';
+
+interface ProjectContextData {
+  architecture: string;
+  technical: string;
+  requirements: string;
+  dependencies: string;
+}
 
 export interface AgentData {
   id: string;
@@ -35,7 +41,7 @@ export abstract class BaseAgent {
 
   constructor(
     data: AgentData,
-    protected prisma: PrismaClient,
+    protected sequelize: Sequelize,
     protected chroma: ChromaProvider,
     protected llm: OpenAIProvider
   ) {
@@ -80,34 +86,13 @@ export abstract class BaseAgent {
   // Core functionality
   public abstract chat(messages: Message[]): Promise<string>;
 
-  public async handleTask(taskId: string): Promise<TaskResult> {
-    const dbTask = await this.prisma.task.findUnique({
-      where: { id: taskId },
-    });
-
-    if (!dbTask) {
-      throw new Error(`Task not found: ${taskId}`);
-    }
-
-    const task: Task = {
-      id: dbTask.id,
-      title: dbTask.title,
-      description: dbTask.description,
-      status: dbTask.status as TaskStatus,
-      priority: dbTask.priority as TaskPriority,
-      dependencies: JSON.parse(dbTask.dependencies),
-      projectId: dbTask.projectId,
-      agentId: dbTask.agentId,
-      createdAt: dbTask.createdAt,
-      updatedAt: dbTask.updatedAt,
-    };
-
+  public async handleTask(task: Task): Promise<TaskResult> {
     try {
       // Update task status
-      await this.prisma.task.update({
-        where: { id: taskId },
-        data: { status: TaskStatus.InProgress },
-      });
+      await TaskModel.update(
+        { status: TaskStatus.InProgress },
+        { where: { id: task.id } }
+      );
 
       // Load agent state
       await this.loadState();
@@ -116,29 +101,27 @@ export abstract class BaseAgent {
       const result = await this.executeTask(task);
 
       // Update task status based on result
-      await this.prisma.task.update({
-        where: { id: taskId },
-        data: {
-          status: result.success ? TaskStatus.Completed : TaskStatus.Failed,
-        },
-      });
+      await TaskModel.update(
+        { status: result.success ? TaskStatus.Completed : TaskStatus.Failed },
+        { where: { id: task.id } }
+      );
 
       // Record task outcome
       if (result.success) {
-        await this.recordSuccess(taskId);
+        await this.recordSuccess(task.id);
       } else {
-        await this.recordFailure(taskId);
+        await this.recordFailure(task.id);
       }
 
       return result;
     } catch (error) {
       // Handle task failure
-      await this.prisma.task.update({
-        where: { id: taskId },
-        data: { status: TaskStatus.Failed },
-      });
+      await TaskModel.update(
+        { status: TaskStatus.Failed },
+        { where: { id: task.id } }
+      );
 
-      await this.recordFailure(taskId);
+      await this.recordFailure(task.id);
 
       return {
         success: false,
@@ -158,7 +141,6 @@ export abstract class BaseAgent {
     let prompt = this.systemPrompt;
 
     if (context) {
-      // Add context to system prompt
       prompt += '\n\nContext:\n' + JSON.stringify(context, null, 2);
     }
 
@@ -166,24 +148,22 @@ export abstract class BaseAgent {
   }
 
   protected async loadState(): Promise<void> {
-    const state = await this.prisma.agentState.findUnique({
+    const state = await AgentState.findOne({
       where: { agentId: this.id },
     });
 
     if (!state) {
-      await this.prisma.agentState.create({
-        data: {
-          agentId: this.id,
-          context: '{}',
-          shortTerm: '[]',
-          longTerm: '[]',
-        },
+      await AgentState.create({
+        agentId: this.id,
+        context: '{}',
+        shortTerm: '[]',
+        longTerm: '[]',
       });
     }
   }
 
-  protected async getState(): Promise<AgentState> {
-    const state = await this.prisma.agentState.findUnique({
+  protected async getState(): Promise<Record<string, any>> {
+    const state = await AgentState.findOne({
       where: { agentId: this.id },
     });
 
@@ -199,20 +179,47 @@ export abstract class BaseAgent {
     };
   }
 
-  protected async saveState(state: AgentState): Promise<void> {
-    await this.prisma.agentState.update({
-      where: { agentId: this.id },
-      data: {
-        context: JSON.stringify(state.context),
-        shortTerm: JSON.stringify(state.shortTerm),
-        longTerm: JSON.stringify(state.longTerm),
+  protected async saveState(state: Record<string, any>): Promise<void> {
+    await AgentState.update(
+      {
+        context: JSON.stringify(state.context || {}),
+        shortTerm: JSON.stringify(state.shortTerm || []),
+        longTerm: JSON.stringify(state.longTerm || []),
         currentTask: state.currentTask,
       },
-    });
+      { where: { agentId: this.id } }
+    );
   }
 
-  protected async getProjectContext(): Promise<ProjectContext> {
-    const context = await this.prisma.projectContext.findUnique({
+  protected async getProjectContext(): Promise<Record<string, any>> {
+    const project = await Project.findByPk(this.projectId, {
+      include: [{
+        model: ProjectContext,
+        as: 'context',
+        required: true,
+      }],
+    });
+
+    if (!project || !project.get('context')) {
+      throw new Error('Project context not found');
+    }
+
+    const context = project.get('context') as unknown as ProjectContextData;
+
+    return {
+      architecture: JSON.parse(context.architecture),
+      technical: JSON.parse(context.technical),
+      requirements: JSON.parse(context.requirements),
+      dependencies: JSON.parse(context.dependencies),
+      project,
+    };
+  }
+
+  protected async updateProjectContext(
+    key: string,
+    value: Record<string, any>
+  ): Promise<void> {
+    const context = await ProjectContext.findOne({
       where: { projectId: this.projectId },
     });
 
@@ -220,23 +227,8 @@ export abstract class BaseAgent {
       throw new Error('Project context not found');
     }
 
-    return {
-      architecture: JSON.parse(context.architecture),
-      technical: JSON.parse(context.technical),
-      requirements: JSON.parse(context.requirements),
-      dependencies: JSON.parse(context.dependencies),
-    };
-  }
-
-  protected async updateProjectContext(
-    key: keyof ProjectContext,
-    value: Record<string, any>
-  ): Promise<void> {
-    await this.prisma.projectContext.update({
-      where: { projectId: this.projectId },
-      data: {
-        [key]: JSON.stringify(value),
-      },
+    await context.update({
+      [key]: JSON.stringify(value),
     });
   }
 
@@ -270,48 +262,16 @@ export abstract class BaseAgent {
   }
 
   private async recordSuccess(taskId: string): Promise<void> {
-    await this.prisma.agent.update({
-      where: { id: this.id },
-      data: {
-        learningProfile: {
-          upsert: {
-            create: {
-              totalTasks: 1,
-              successfulTasks: 1,
-              failedTasks: 0,
-              averageMetrics: '{}',
-              learningRate: 1,
-            },
-            update: {
-              totalTasks: { increment: 1 },
-              successfulTasks: { increment: 1 },
-            },
-          },
-        },
-      },
-    });
+    const agent = await Agent.findByPk(this.id);
+    if (agent) {
+      await agent.increment(['totalTasks', 'successfulTasks']);
+    }
   }
 
   private async recordFailure(taskId: string): Promise<void> {
-    await this.prisma.agent.update({
-      where: { id: this.id },
-      data: {
-        learningProfile: {
-          upsert: {
-            create: {
-              totalTasks: 1,
-              successfulTasks: 0,
-              failedTasks: 1,
-              averageMetrics: '{}',
-              learningRate: 1,
-            },
-            update: {
-              totalTasks: { increment: 1 },
-              failedTasks: { increment: 1 },
-            },
-          },
-        },
-      },
-    });
+    const agent = await Agent.findByPk(this.id);
+    if (agent) {
+      await agent.increment(['totalTasks', 'failedTasks']);
+    }
   }
 }

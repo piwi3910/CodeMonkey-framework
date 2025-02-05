@@ -4,17 +4,13 @@ import {
   CommandContext,
   CommandResult,
 } from '../types';
-import { BaseCommandHandler, CommandBuilder } from '../registry';
+import { BaseCommandHandler } from '../registry';
 import { AgentFactory, AgentConfig, AgentRole } from '../../agents/factory';
 import { LearningManager } from '../../learning/manager';
-import { PrismaClient } from '@prisma/client';
-import { ChromaProvider } from '../../providers/chroma';
-import { OpenAIProvider } from '../../providers/openai';
-import { config } from '../../config/env';
+import { Agent, Project } from '../../models';
 
 export class AgentCommandHandler extends BaseCommandHandler {
   constructor(
-    private prisma: PrismaClient,
     private factory: AgentFactory,
     private learning: LearningManager
   ) {
@@ -59,7 +55,7 @@ export class AgentCommandHandler extends BaseCommandHandler {
       role: options.role as AgentRole,
       projectId: options.project,
       provider: options.provider,
-      model: options.model,
+      modelName: options.model,
     };
 
     const agent = await this.factory.createAgent(config);
@@ -78,83 +74,54 @@ export class AgentCommandHandler extends BaseCommandHandler {
   private async listAgents(options: Record<string, any>): Promise<CommandResult> {
     const { projectId } = options;
 
-    const agents = await this.prisma.agent.findMany({
+    const agents = await Agent.findAll({
       where: projectId ? { projectId } : undefined,
-      include: {
-        project: true,
-        learningProfile: {
-          select: {
-            totalTasks: true,
-            successfulTasks: true,
-            learningRate: true,
-          },
-        },
-      },
+      include: [{
+        model: Project,
+        as: 'project',
+        required: true,
+      }],
     });
 
     return this.formatResult({
-      agents: agents.map(agent => ({
-        id: agent.id,
-        name: agent.name,
-        role: agent.role,
-        projectName: agent.project.name,
-        metrics: agent.learningProfile && {
-          totalTasks: agent.learningProfile.totalTasks,
-          successRate: agent.learningProfile.successfulTasks / agent.learningProfile.totalTasks,
-          learningRate: agent.learningProfile.learningRate,
-        },
-      })),
+      agents: agents.map(agent => {
+        const project = agent.get('project') as Project;
+        return {
+          id: agent.get('id'),
+          name: agent.get('name'),
+          role: agent.get('role'),
+          projectName: project.get('name'),
+        };
+      }),
     });
   }
 
   private async getAgentInfo(options: Record<string, any>): Promise<CommandResult> {
     const { id } = options;
 
-    const agent = await this.prisma.agent.findUnique({
-      where: { id },
-      include: {
-        project: true,
-        learningProfile: {
-          include: {
-            skills: true,
-            specializations: true,
-            metrics: {
-              take: 10,
-              orderBy: { timestamp: 'desc' },
-            },
-          },
-        },
-        state: true,
-      },
+    const agent = await Agent.findByPk(id, {
+      include: [{
+        model: Project,
+        as: 'project',
+        required: true,
+      }],
     });
 
     if (!agent) {
       return this.formatError(`Agent not found: ${id}`);
     }
 
+    const project = agent.get('project') as Project;
+
     return this.formatResult({
       agent: {
-        id: agent.id,
-        name: agent.name,
-        role: agent.role,
-        projectName: agent.project.name,
-        provider: agent.provider,
-        model: agent.model,
-        systemPrompt: agent.systemPrompt,
-        learning: agent.learningProfile && {
-          totalTasks: agent.learningProfile.totalTasks,
-          successfulTasks: agent.learningProfile.successfulTasks,
-          failedTasks: agent.learningProfile.failedTasks,
-          learningRate: agent.learningProfile.learningRate,
-          skills: agent.learningProfile.skills.map(s => JSON.parse(s.data)),
-          specializations: agent.learningProfile.specializations.map(s => JSON.parse(s.data)),
-          recentMetrics: agent.learningProfile.metrics.map(m => JSON.parse(m.data)),
-        },
-        state: agent.state && {
-          context: JSON.parse(agent.state.context),
-          shortTerm: JSON.parse(agent.state.shortTerm),
-          longTerm: JSON.parse(agent.state.longTerm),
-        },
+        id: agent.get('id'),
+        name: agent.get('name'),
+        role: agent.get('role'),
+        projectName: project.get('name'),
+        provider: agent.get('provider'),
+        modelName: agent.get('model'),
+        systemPrompt: agent.get('systemPrompt'),
       },
     });
   }
@@ -162,7 +129,7 @@ export class AgentCommandHandler extends BaseCommandHandler {
   private async deleteAgent(options: Record<string, any>): Promise<CommandResult> {
     const { id } = options;
 
-    await this.prisma.agent.delete({
+    await Agent.destroy({
       where: { id },
     });
 
@@ -173,21 +140,40 @@ export class AgentCommandHandler extends BaseCommandHandler {
   }
 
   private async updateAgent(options: Record<string, any>): Promise<CommandResult> {
-    const { id, name, provider, model, systemPrompt } = options;
+    const { id, name, provider, model: modelName, systemPrompt } = options;
 
-    const agent = await this.prisma.agent.update({
-      where: { id },
-      data: {
-        ...(name && { name }),
-        ...(provider && { provider }),
-        ...(model && { model }),
-        ...(systemPrompt && { systemPrompt }),
-      },
+    const agent = await Agent.findByPk(id, {
+      include: [{
+        model: Project,
+        as: 'project',
+        required: true,
+      }],
     });
+
+    if (!agent) {
+      return this.formatError(`Agent not found: ${id}`);
+    }
+
+    await agent.update({
+      ...(name && { name }),
+      ...(provider && { provider }),
+      ...(modelName && { model: modelName }),
+      ...(systemPrompt && { systemPrompt }),
+    });
+
+    const project = agent.get('project') as Project;
 
     return this.formatResult({
       message: 'Agent updated successfully',
-      agent,
+      agent: {
+        id: agent.get('id'),
+        name: agent.get('name'),
+        role: agent.get('role'),
+        projectName: project.get('name'),
+        provider: agent.get('provider'),
+        modelName: agent.get('model'),
+        systemPrompt: agent.get('systemPrompt'),
+      },
     });
   }
 

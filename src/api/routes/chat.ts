@@ -1,164 +1,96 @@
-import { Router, Request, Response } from 'express';
-import { z } from 'zod';
-import { ValidationError } from '../middleware/error';
-import { ClaudeProvider, ClaudeConfig } from '../../providers/claude';
+import { Router, Express } from 'express';
+import { WhereOptions, Op } from 'sequelize';
+import { Agent, Task } from '../../models';
+import { AgentFactory } from '../../agents/factory';
+import { ChromaProvider } from '../../providers/chroma';
+import { OpenAIProvider } from '../../providers/openai';
 import { config } from '../../config/env';
 
-const router = Router();
+// Initialize providers
+const chroma = new ChromaProvider();
 
-// Validation schemas
-const functionSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  parameters: z.record(z.any()),
+const llm = new OpenAIProvider({
+  apiKey: config.llm.openai.apiKey || '',
+  modelName: config.llm.defaultModel,
 });
 
-const functionCallSchema = z.union([
-  z.literal('auto'),
-  z.literal('none'),
-  z.object({ name: z.string() }),
-]);
+// Initialize factory
+const factory = new AgentFactory(chroma, llm);
 
-const messageSchema = z.object({
-  role: z.enum(['system', 'user', 'assistant', 'function']),
-  content: z.string(),
-  name: z.string().optional(),
-  function_call: z.object({ name: z.string() }).optional(),
-});
+export function setupRoutes(app: Express) {
+  const router = Router();
 
-const chatCompletionRequestSchema = z.object({
-  model: z.string(),
-  messages: z.array(messageSchema),
-  temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().positive().optional(),
-  stream: z.boolean().optional(),
-  functions: z.array(functionSchema).optional(),
-  function_call: functionCallSchema.optional(),
-});
+  // Chat with an agent
+  router.post('/chat/:agentId', async (req, res, next) => {
+    try {
+      const { agentId } = req.params;
+      const { messages } = req.body;
 
-// Provider configuration
-const providerConfigs: Record<string, ClaudeConfig> = {
-  'claude-3-opus-20240229': {
-    apiKey: config.llm.claude.apiKey!,
-    modelName: 'claude-3-opus-20240229',
-  },
-  'claude-3-sonnet-20240229': {
-    apiKey: config.llm.claude.apiKey!,
-    modelName: 'claude-3-sonnet-20240229',
-  },
-  'claude-3-haiku-20240229': {
-    apiKey: config.llm.claude.apiKey!,
-    modelName: 'claude-3-haiku-20240229',
-  },
-};
+      const agent = await Agent.findByPk(agentId);
+      if (!agent) {
+        return res.status(404).json({ error: 'Agent not found' });
+      }
 
-interface StreamChunk {
-  id: string;
-  object: string;
-  created: number;
-  model: string;
-  choices: Array<{
-    index: number;
-    delta: {
-      content: string;
-    };
-    finish_reason: string | null;
-  }>;
-}
+      // Get agent instance using factory
+      const agentInstance = await factory.getAgent(agentId);
+      const response = await agentInstance.chat(messages);
 
-// Chat completion endpoint
-router.post('/chat/completions', async (req: Request, res: Response) => {
-  try {
-    // Validate request body
-    const validatedData = chatCompletionRequestSchema.parse(req.body);
-    
-    // Get the appropriate provider config
-    const providerConfig = providerConfigs[validatedData.model];
-    if (!providerConfig) {
-      throw new ValidationError('Unsupported model', 'model');
+      res.json({ response });
+    } catch (error) {
+      next(error);
     }
+  });
 
-    // Initialize provider
-    const provider = new ClaudeProvider(providerConfig);
+  // Create a task for an agent
+  router.post('/task/:agentId', async (req, res, next) => {
+    try {
+      const { agentId } = req.params;
+      const { title, description, priority } = req.body;
 
-    // Handle streaming response
-    if (validatedData.stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
+      const agent = await Agent.findByPk(agentId);
+      if (!agent) {
+        return res.status(404).json({ error: 'Agent not found' });
+      }
 
-      const stream = provider.stream(validatedData.messages, {
-        temperature: validatedData.temperature,
-        maxTokens: validatedData.max_tokens,
-        functions: validatedData.functions,
-        functionCall: validatedData.function_call as "auto" | "none" | { name: string } | undefined,
+      const task = await Task.create({
+        title,
+        description,
+        priority,
+        agentId,
+        projectId: agent.get('projectId'),
+        status: 'pending',
       });
 
-      try {
-        for await (const chunk of stream) {
-          const streamChunk: StreamChunk = {
-            id: chunk.id || `chatcmpl-${Date.now()}`,
-            object: 'chat.completion.chunk',
-            created: Date.now(),
-            model: validatedData.model,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  content: chunk.content || '',
-                },
-                finish_reason: null,
-              },
-            ],
-          };
+      res.json({ task });
+    } catch (error) {
+      next(error);
+    }
+  });
 
-          res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
-        }
+  // Get agent tasks
+  router.get('/tasks/:agentId', async (req, res, next) => {
+    try {
+      const { agentId } = req.params;
+      const { status } = req.query;
 
-        res.write('data: [DONE]\n\n');
-      } catch (error) {
-        console.error('Streaming error:', error);
-        res.write(`data: ${JSON.stringify({ error: 'Streaming error occurred' })}\n\n`);
-      } finally {
-        res.end();
+      const where: WhereOptions<Task> = {
+        agentId,
+      };
+
+      if (status && typeof status === 'string') {
+        where.status = status;
       }
-      return;
+
+      const tasks = await Task.findAll({
+        where,
+        order: [['createdAt', 'DESC']],
+      });
+
+      res.json({ tasks });
+    } catch (error) {
+      next(error);
     }
+  });
 
-    // Handle regular response
-    const response = await provider.chat(validatedData.messages, {
-      temperature: validatedData.temperature,
-      maxTokens: validatedData.max_tokens,
-      functions: validatedData.functions,
-      functionCall: validatedData.function_call as "auto" | "none" | { name: string } | undefined,
-    });
-
-    res.json({
-      id: response.id || `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: Date.now(),
-      model: validatedData.model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: response.content,
-          },
-          finish_reason: 'stop',
-        },
-      ],
-      usage: response.usage,
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      throw new ValidationError(
-        'Invalid request format',
-        error.errors[0].path.join('.')
-      );
-    }
-    throw error;
-  }
-});
-
-export const chatRouter = router;
+  app.use('/api', router);
+}

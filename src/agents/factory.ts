@@ -1,67 +1,87 @@
-import { PrismaClient } from '@prisma/client';
 import { ChromaProvider } from '../providers/chroma';
 import { OpenAIProvider } from '../providers/openai';
-import { BaseAgent, AgentData } from './base';
-import { FrontendDeveloperAgent } from './implementations/frontend-developer';
+import { BaseAgent } from './base';
+import { FrontendDeveloperAgent } from './frontend-developer';
+import { BackendDeveloperAgent } from './backend-developer';
+import { CodeReviewerAgent } from './code-reviewer';
+import { DevOpsAgent } from './devops';
+import { QAEngineerAgent } from './qa-engineer';
+import { ProjectManagerAgent } from './project-manager';
+import { ArchitectAgent } from './architect';
+import { Agent, AgentState } from '../models';
+import { sequelize } from '../database/init';
 
-// Import other implementations as they're created
-// import { BackendDeveloperAgent } from './implementations/backend-developer';
-// import { ArchitectAgent } from './implementations/architect';
-// etc.
-
-export type AgentRole =
-  | 'project_manager'
-  | 'architect'
-  | 'frontend_developer'
-  | 'backend_developer'
-  | 'code_reviewer'
-  | 'devops'
-  | 'qa_engineer';
+export enum AgentRole {
+  FrontendDeveloper = 'frontend-developer',
+  BackendDeveloper = 'backend-developer',
+  CodeReviewer = 'code-reviewer',
+  DevOps = 'devops',
+  QAEngineer = 'qa-engineer',
+  ProjectManager = 'project-manager',
+  Architect = 'architect',
+}
 
 export interface AgentConfig {
-  name: string;
+  name?: string;
   role: AgentRole;
   projectId: string;
   provider: string;
-  model: string;
+  modelName: string;
 }
 
 export class AgentFactory {
   constructor(
-    private prisma: PrismaClient,
     private chroma: ChromaProvider,
     private llm: OpenAIProvider
   ) {}
 
-  async createAgent(config: AgentConfig): Promise<BaseAgent> {
-    // Create agent record in database
-    const agent = await this.prisma.agent.create({
-      data: {
-        name: config.name,
+  public async createAgent(config: AgentConfig): Promise<BaseAgent> {
+    // Get role-specific system prompt
+    const systemPrompt = await this.getRolePrompt(config.role);
+
+    // Create agent record in transaction
+    const result = await sequelize.transaction(async (t) => {
+      // Create agent
+      const agent = await Agent.create({
+        name: config.name || `${config.role} Agent`,
         role: config.role,
-        projectId: config.projectId,
         provider: config.provider,
-        model: config.model,
-        systemPrompt: this.getSystemPrompt(config.role),
-        learningProfile: {
-          create: {
-            totalTasks: 0,
-            successfulTasks: 0,
-            failedTasks: 0,
-            averageMetrics: '{}',
-            learningRate: 1,
-          },
-        },
-      },
-      include: {
-        project: true,
-        learningProfile: true,
-        state: true,
-      },
+        model: config.modelName,
+        systemPrompt,
+        projectId: config.projectId,
+      }, { transaction: t });
+
+      // Create initial state
+      await AgentState.create({
+        agentId: agent.id,
+        context: '{}',
+        shortTerm: '[]',
+        longTerm: '[]',
+      }, { transaction: t });
+
+      return agent;
     });
 
-    // Create agent instance
-    const agentData: AgentData = {
+    // Create agent instance based on role
+    return this.instantiateAgent({
+      id: result.id,
+      name: result.name,
+      role: result.role as AgentRole,
+      projectId: result.projectId,
+      provider: result.provider,
+      model: result.model,
+      systemPrompt: result.systemPrompt,
+    });
+  }
+
+  public async getAgent(agentId: string): Promise<BaseAgent> {
+    const agent = await Agent.findByPk(agentId);
+
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    return this.instantiateAgent({
       id: agent.id,
       name: agent.name,
       role: agent.role as AgentRole,
@@ -69,56 +89,46 @@ export class AgentFactory {
       provider: agent.provider,
       model: agent.model,
       systemPrompt: agent.systemPrompt,
-    };
-
-    return this.instantiateAgent(agentData);
+    });
   }
 
-  private getSystemPrompt(role: AgentRole): string {
-    switch (role) {
-      case 'project_manager':
-        return 'You are a project manager responsible for coordinating the development team...';
-      case 'architect':
-        return 'You are a software architect responsible for system design and technical decisions...';
-      case 'frontend_developer':
-        return 'You are a frontend developer skilled in creating user interfaces...';
-      case 'backend_developer':
-        return 'You are a backend developer skilled in server-side development...';
-      case 'code_reviewer':
-        return 'You are a code reviewer responsible for maintaining code quality...';
-      case 'devops':
-        return 'You are a DevOps engineer responsible for deployment and infrastructure...';
-      case 'qa_engineer':
-        return 'You are a QA engineer responsible for testing and quality assurance...';
-      default:
-        throw new Error(`Unknown agent role: ${role}`);
-    }
-  }
-
-  private instantiateAgent(data: AgentData): BaseAgent {
-    // For now, return FrontendDeveloperAgent for all roles until other implementations are ready
-    return new FrontendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
-
-    // TODO: Uncomment and implement other agent types
-    /*
+  private instantiateAgent(data: {
+    id: string;
+    name: string;
+    role: AgentRole;
+    projectId: string;
+    provider: string;
+    model: string;
+    systemPrompt: string;
+  }): BaseAgent {
     switch (data.role) {
-      case 'project_manager':
-        return new ProjectManagerAgent(data, this.prisma, this.chroma, this.llm);
-      case 'architect':
-        return new ArchitectAgent(data, this.prisma, this.chroma, this.llm);
-      case 'frontend_developer':
-        return new FrontendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
-      case 'backend_developer':
-        return new BackendDeveloperAgent(data, this.prisma, this.chroma, this.llm);
-      case 'code_reviewer':
-        return new CodeReviewerAgent(data, this.prisma, this.chroma, this.llm);
-      case 'devops':
-        return new DevOpsAgent(data, this.prisma, this.chroma, this.llm);
-      case 'qa_engineer':
-        return new QAEngineerAgent(data, this.prisma, this.chroma, this.llm);
+      case AgentRole.FrontendDeveloper:
+        return new FrontendDeveloperAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.BackendDeveloper:
+        return new BackendDeveloperAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.CodeReviewer:
+        return new CodeReviewerAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.DevOps:
+        return new DevOpsAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.QAEngineer:
+        return new QAEngineerAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.ProjectManager:
+        return new ProjectManagerAgent(data, sequelize, this.chroma, this.llm);
+      case AgentRole.Architect:
+        return new ArchitectAgent(data, sequelize, this.chroma, this.llm);
       default:
         throw new Error(`Unknown agent role: ${data.role}`);
     }
-    */
+  }
+
+  private async getRolePrompt(role: AgentRole): Promise<string> {
+    const promptPath = `prompts/${role}.md`;
+    try {
+      const fs = await import('fs/promises');
+      const prompt = await fs.readFile(promptPath, 'utf-8');
+      return prompt;
+    } catch (error) {
+      throw new Error(`Failed to load prompt for role ${role}: ${error}`);
+    }
   }
 }

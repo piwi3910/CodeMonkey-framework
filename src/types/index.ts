@@ -1,16 +1,44 @@
-export type FunctionCallType = 'none' | 'auto' | { name: string };
+import { Prisma } from '@prisma/client';
 
-export interface Message {
-  role: 'system' | 'user' | 'assistant' | 'function';
-  content: string;
-  name?: string;
-  function_call?: {
-    name: string;
-    arguments?: string;
+// Prisma Model Types with Relations
+export type ProjectWithRelations = Prisma.ProjectGetPayload<{
+  include: {
+    agents: true;
+    tasks: true;
+    context: true;
   };
-}
+}>;
 
-export interface Task {
+export type AgentWithRelations = Prisma.AgentGetPayload<{
+  include: {
+    project: true;
+    tasks: true;
+    state: true;
+    learningProfile: true;
+  };
+}>;
+
+export type TaskWithRelations = Prisma.TaskGetPayload<{
+  include: {
+    project: true;
+    agent: true;
+  };
+}>;
+
+export type AgentStateWithRelations = Prisma.AgentStateGetPayload<{
+  include: {
+    agent: true;
+  };
+}>;
+
+export type ProjectContextWithRelations = Prisma.ProjectContextGetPayload<{
+  include: {
+    project: true;
+  };
+}>;
+
+// Re-export base types for backward compatibility
+export type Task = {
   id: string;
   title: string;
   description: string;
@@ -21,6 +49,42 @@ export interface Task {
   agentId?: string | null;
   createdAt: Date;
   updatedAt: Date;
+  project?: ProjectWithRelations;
+  agent?: AgentWithRelations | null;
+};
+
+export type AgentState = {
+  id: string;
+  agentId: string;
+  context: string;
+  shortTerm: string;
+  longTerm: string;
+  currentTask: string | null;
+  updatedAt: Date;
+  agent?: AgentWithRelations;
+};
+
+export type ProjectContext = {
+  id: string;
+  projectId: string;
+  architecture: string;
+  technical: string;
+  requirements: string;
+  dependencies: string;
+  updatedAt: Date;
+  project?: ProjectWithRelations;
+};
+
+export type FunctionCallType = 'none' | 'auto' | { name: string };
+
+export interface Message {
+  role: 'system' | 'user' | 'assistant' | 'function';
+  content: string;
+  name?: string;
+  function_call?: {
+    name: string;
+    arguments?: string;
+  };
 }
 
 export enum TaskStatus {
@@ -110,20 +174,6 @@ export interface ChatResponse {
     name: string;
     arguments: string;
   };
-}
-
-export interface AgentState {
-  context: Record<string, any>;
-  shortTerm: any[];
-  longTerm: any[];
-  currentTask?: string | null;
-}
-
-export interface ProjectContext {
-  architecture: Record<string, any>;
-  technical: Record<string, any>;
-  requirements: Record<string, any>;
-  dependencies: Record<string, any>;
 }
 
 export interface TaskResult {

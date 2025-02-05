@@ -1,222 +1,185 @@
 import { PrismaClient } from '@prisma/client';
-import { Redis } from 'ioredis';
-import { LLMProvider } from '../providers/base';
-import { AgentRole, AgentState, Message, Task } from '../types';
-import { config } from '../config/env';
 import { ChromaProvider } from '../providers/chroma';
+import { OpenAIProvider } from '../providers/openai';
+import { Message } from '../types';
 
-interface AgentMemory {
-  shortTerm: Message[];
-  longTerm: Message[];
+export interface AgentData {
+  id: string;
+  name: string;
+  role: string;
+  projectId: string;
+  provider: string;
+  model: string;
+  systemPrompt: string;
 }
-
-interface AgentContext {
-  [key: string]: unknown;
-}
-
-const REDIS_STATE_TTL = config.agent.memoryTtl;
-const REDIS_STATE_PREFIX = 'agent:state:';
 
 export abstract class BaseAgent {
-  protected prisma: PrismaClient;
-  protected redis: Redis;
-  protected llm: LLMProvider;
-  protected chroma: ChromaProvider;
-  protected state: {
-    currentTask?: string;
-    context: AgentContext;
-    memory: AgentMemory;
-  };
+  protected id: string;
+  protected name: string;
+  protected role: string;
+  protected projectId: string;
+  protected provider: string;
+  protected model: string;
+  protected systemPrompt: string;
 
   constructor(
-    protected id: string,
-    protected name: string,
-    protected role: AgentRole,
-    protected projectId: string,
-    prisma: PrismaClient,
-    redis: Redis,
-    llm: LLMProvider,
-    chroma: ChromaProvider
+    data: AgentData,
+    protected prisma: PrismaClient,
+    protected chroma: ChromaProvider,
+    protected llm: OpenAIProvider
   ) {
-    this.prisma = prisma;
-    this.redis = redis;
-    this.llm = llm;
-    this.chroma = chroma;
-    this.state = {
-      currentTask: undefined,
-      context: {},
-      memory: {
-        shortTerm: [],
-        longTerm: [],
-      },
-    };
+    this.id = data.id;
+    this.name = data.name;
+    this.role = data.role;
+    this.projectId = data.projectId;
+    this.provider = data.provider;
+    this.model = data.model;
+    this.systemPrompt = data.systemPrompt;
   }
 
-  // Core agent methods
-  abstract processMessage(message: Message): Promise<Message>;
-  abstract handleTask(task: Task): Promise<void>;
-  abstract planNextAction(): Promise<void>;
+  // Public getters for agent properties
+  public getId(): string {
+    return this.id;
+  }
+
+  public getName(): string {
+    return this.name;
+  }
+
+  public getRole(): string {
+    return this.role;
+  }
+
+  public getProjectId(): string {
+    return this.projectId;
+  }
+
+  public getProvider(): string {
+    return this.provider;
+  }
+
+  public getModel(): string {
+    return this.model;
+  }
+
+  public getSystemPrompt(): string {
+    return this.systemPrompt;
+  }
+
+  // Core agent functionality
+  abstract chat(messages: Message[]): Promise<string>;
+  abstract handleTask(taskId: string): Promise<void>;
+  abstract reviewCode(filePath: string): Promise<string>;
+  abstract suggestImprovements(context: string): Promise<string>;
 
   // State management
   protected async loadState(): Promise<void> {
-    // Try to get state from Redis first
-    const cachedState = await this.redis.get(this.getRedisStateKey());
-    
-    if (cachedState) {
-      this.state = JSON.parse(cachedState);
-      return;
-    }
-
-    // If not in Redis, load from database
-    const agentState = await this.prisma.agentState.findUnique({
+    const state = await this.prisma.agentState.findUnique({
       where: { agentId: this.id },
     });
 
-    if (agentState) {
-      this.state = {
-        currentTask: agentState.currentTask || undefined,
-        context: JSON.parse(agentState.context) as AgentContext,
-        memory: {
-          shortTerm: JSON.parse(agentState.shortTerm) as Message[],
-          longTerm: JSON.parse(agentState.longTerm) as Message[],
+    if (!state) {
+      await this.prisma.agentState.create({
+        data: {
+          agentId: this.id,
+          context: '{}',
+          shortTerm: '[]',
+          longTerm: '[]',
         },
-      };
-
-      // Cache the state in Redis
-      await this.cacheState();
+      });
     }
   }
 
-  protected async saveState(): Promise<void> {
-    // Save to database
-    await this.prisma.agentState.upsert({
+  protected async saveState(
+    context: string,
+    shortTerm: string,
+    longTerm: string
+  ): Promise<void> {
+    await this.prisma.agentState.update({
       where: { agentId: this.id },
-      update: {
-        currentTask: this.state.currentTask,
-        context: JSON.stringify(this.state.context),
-        shortTerm: JSON.stringify(this.state.memory.shortTerm),
-        longTerm: JSON.stringify(this.state.memory.longTerm),
-      },
-      create: {
-        agentId: this.id,
-        currentTask: this.state.currentTask,
-        context: JSON.stringify(this.state.context),
-        shortTerm: JSON.stringify(this.state.memory.shortTerm),
-        longTerm: JSON.stringify(this.state.memory.longTerm),
+      data: {
+        context,
+        shortTerm,
+        longTerm,
       },
     });
-
-    // Update Redis cache
-    await this.cacheState();
-  }
-
-  private async cacheState(): Promise<void> {
-    await this.redis.setex(
-      this.getRedisStateKey(),
-      REDIS_STATE_TTL,
-      JSON.stringify(this.state)
-    );
-  }
-
-  private getRedisStateKey(): string {
-    return `${REDIS_STATE_PREFIX}${this.id}`;
   }
 
   // Memory management
-  protected async addToMemory(message: Message, type: 'shortTerm' | 'longTerm'): Promise<void> {
-    // Add to local state
-    const memoryArray = this.state.memory[type];
-    memoryArray.push(message);
-
-    if (type === 'shortTerm') {
-      // Keep only recent messages in short-term memory
-      const maxShortTermMemory = 10;
-      if (memoryArray.length > maxShortTermMemory) {
-        this.state.memory.shortTerm = memoryArray.slice(-maxShortTermMemory);
-      }
-    }
-
-    // Add to ChromaDB for vector search
-    await this.chroma.addMemory(
-      message.content,
-      {
-        agentId: this.id,
-        projectId: this.projectId,
-        type,
-        timestamp: new Date().toISOString(),
-      }
-    );
-    
-    await this.saveState();
+  protected async memorize(
+    content: string,
+    type: 'shortTerm' | 'longTerm',
+    metadata: Record<string, any>
+  ): Promise<void> {
+    await this.chroma.addMemory(content, {
+      source: this.role,
+      type: type === 'shortTerm' ? 'short_term' : 'long_term',
+      tags: [this.role, type],
+      relatedMemories: [],
+      agentId: this.id,
+      projectId: this.projectId,
+    });
   }
 
-  protected async clearShortTermMemory(): Promise<void> {
-    this.state.memory.shortTerm = [];
-    await this.saveState();
+  protected async recall(
+    query: string,
+    type?: 'shortTerm' | 'longTerm'
+  ): Promise<string[]> {
+    const memories = await this.chroma.findRelevantMemories(query, {
+      agentId: this.id,
+      projectId: this.projectId,
+      type: type ? (type === 'shortTerm' ? 'short_term' : 'long_term') : undefined,
+    });
+
+    return memories.map(m => m.content);
   }
 
-  // Context management
-  protected async updateContext(key: string, value: unknown): Promise<void> {
-    this.state.context[key] = value;
-    await this.saveState();
-  }
-
-  protected async clearContext(): Promise<void> {
-    this.state.context = {};
-    await this.saveState();
-  }
-
-  // Task management
-  protected async assignTask(task: Task): Promise<void> {
-    await this.prisma.task.update({
-      where: { id: task.id },
+  // Learning management
+  protected async recordSuccess(taskId: string): Promise<void> {
+    // Record successful task completion
+    await this.prisma.learningProfile.update({
+      where: { agentId: this.id },
       data: {
-        agentId: this.id,
-        status: 'in_progress',
+        totalTasks: { increment: 1 },
+        successfulTasks: { increment: 1 },
       },
     });
-    this.state.currentTask = task.id;
-    await this.saveState();
   }
 
-  protected async completeTask(taskId: string): Promise<void> {
-    await this.prisma.task.update({
-      where: { id: taskId },
+  protected async recordFailure(taskId: string): Promise<void> {
+    // Record task failure
+    await this.prisma.learningProfile.update({
+      where: { agentId: this.id },
       data: {
-        status: 'completed',
+        totalTasks: { increment: 1 },
+        failedTasks: { increment: 1 },
       },
     });
-    if (this.state.currentTask === taskId) {
-      this.state.currentTask = undefined;
-      await this.saveState();
-    }
   }
 
   // Utility methods
-  protected async sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  protected formatSystemPrompt(): string {
-    return `You are ${this.name}, a ${this.role} agent. Your current context is: ${JSON.stringify(this.state.context)}`;
-  }
-
-  protected async getRelevantMemories(query: string): Promise<Message[]> {
-    // Use ChromaDB for semantic search
-    const relevantMemories = await this.chroma.findRelevantMemories(query, {
-      agentId: this.id,
-      projectId: this.projectId,
-      nResults: 5,
+  protected async getProjectContext(): Promise<Record<string, any>> {
+    const context = await this.prisma.projectContext.findUnique({
+      where: { projectId: this.projectId },
     });
 
-    // Convert ChromaDB documents back to messages
-    return relevantMemories.map(doc => {
-      const metadata = doc.metadata;
-      return {
-        role: 'assistant',
-        content: doc.content,
-        timestamp: metadata.timestamp,
-      };
+    return context ? {
+      architecture: JSON.parse(context.architecture),
+      technical: JSON.parse(context.technical),
+      requirements: JSON.parse(context.requirements),
+      dependencies: JSON.parse(context.dependencies),
+    } : {};
+  }
+
+  protected async updateProjectContext(
+    key: 'architecture' | 'technical' | 'requirements' | 'dependencies',
+    value: Record<string, any>
+  ): Promise<void> {
+    await this.prisma.projectContext.update({
+      where: { projectId: this.projectId },
+      data: {
+        [key]: JSON.stringify(value),
+      },
     });
   }
 }

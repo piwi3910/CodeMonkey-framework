@@ -20,18 +20,19 @@ model Project {
 }
 
 model Agent {
-  id            String       @id @default(uuid())
-  name          String
-  role          String
-  provider      String
-  systemPrompt  String
-  projectId     String
-  project       Project      @relation(fields: [projectId], references: [id])
-  tasks         Task[]
-  state         AgentState?
+  id              String           @id @default(uuid())
+  name            String
+  role            String
+  provider        String
+  model           String
+  systemPrompt    String
+  projectId       String
+  project         Project          @relation(fields: [projectId], references: [id])
+  tasks           Task[]
+  state           AgentState?
   learningProfile LearningProfile?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 }
 
 model AgentState {
@@ -72,15 +73,15 @@ model ProjectContext {
 
 // Learning System Models
 model LearningProfile {
-  id              String            @id @default(uuid())
-  agentId         String           @unique
-  agent           Agent            @relation(fields: [agentId], references: [id])
-  totalTasks      Int              @default(0)
-  successfulTasks Int              @default(0)
-  failedTasks     Int              @default(0)
-  averageMetrics  String           @default("{}")
-  learningRate    Float            @default(1)
-  lastUpdated     DateTime         @default(now())
+  id              String                  @id @default(uuid())
+  agentId         String                  @unique
+  agent           Agent                   @relation(fields: [agentId], references: [id])
+  totalTasks      Int                     @default(0)
+  successfulTasks Int                     @default(0)
+  failedTasks     Int                     @default(0)
+  averageMetrics  String                  @default("{}")
+  learningRate    Float                   @default(1)
+  lastUpdated     DateTime                @default(now())
   skills          LearningSkill[]
   specializations LearningSpecialization[]
   metrics         LearningMetric[]
@@ -110,15 +111,15 @@ model LearningMetric {
 
 // Collaboration System Models
 model CollaborationSession {
-  id           String                  @id @default(uuid())
+  id           String                     @id @default(uuid())
   type         String
   status       String
   context      String
   workflow     String
   protocol     String
   metrics      String?
-  createdAt    DateTime               @default(now())
-  updatedAt    DateTime               @updatedAt
+  createdAt    DateTime                   @default(now())
+  updatedAt    DateTime                   @updatedAt
   participants CollaborationParticipant[]
   messages     CollaborationMessage[]
 }

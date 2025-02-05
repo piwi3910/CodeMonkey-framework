@@ -1,237 +1,110 @@
 import { PrismaClient } from '@prisma/client';
-import { Redis } from 'ioredis';
-import { BaseAgent } from './base';
-import { ProjectManagerAgent } from './project-manager';
-import { ArchitectAgent } from './architect';
-import { FrontendDeveloperAgent } from './frontend-developer';
-import { BackendDeveloperAgent } from './backend-developer';
-import { CodeReviewerAgent } from './code-reviewer';
-import { DevOpsAgent } from './devops';
-import { QAEngineerAgent } from './qa-engineer';
-import { AgentRole, FrameworkError } from '../types';
-import { LLMProvider } from '../providers/base';
-import { ClaudeProvider } from '../providers/claude';
-import { OpenAIProvider } from '../providers/openai';
-import { OpenRouterProvider } from '../providers/openrouter';
-import { OllamaProvider } from '../providers/ollama';
 import { ChromaProvider } from '../providers/chroma';
-import { config } from '../config/env';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import { OpenAIProvider } from '../providers/openai';
+import { BaseAgent } from './base';
+import { ProjectManager } from './project-manager';
+import { Architect } from './architect';
+import { FrontendDeveloper } from './frontend-developer';
+import { BackendDeveloper } from './backend-developer';
+import { CodeReviewer } from './code-reviewer';
+import { DevOps } from './devops';
+import { QAEngineer } from './qa-engineer';
+
+export type AgentRole =
+  | 'project_manager'
+  | 'architect'
+  | 'frontend_developer'
+  | 'backend_developer'
+  | 'code_reviewer'
+  | 'devops'
+  | 'qa_engineer';
+
+export interface AgentConfig {
+  name: string;
+  role: AgentRole;
+  projectId: string;
+  provider: string;
+  model: string;
+}
 
 export class AgentFactory {
-  private chroma: ChromaProvider;
-  private promptCache: Map<string, string> = new Map();
-
   constructor(
     private prisma: PrismaClient,
-    private redis: Redis
-  ) {
-    this.chroma = new ChromaProvider();
-  }
+    private chroma: ChromaProvider,
+    private llm: OpenAIProvider
+  ) {}
 
-  async initialize(): Promise<void> {
-    await this.chroma.initialize();
-    await this.loadPrompts();
-  }
-
-  private async loadPrompts(): Promise<void> {
-    const promptsDir = path.join(process.cwd(), 'prompts');
-    const roles = [
-      'project-manager',
-      'architect',
-      'frontend-developer',
-      'backend-developer',
-      'code-reviewer',
-      'devops',
-      'qa-engineer',
-    ];
-
-    for (const role of roles) {
-      const promptPath = path.join(promptsDir, `${role}.md`);
-      try {
-        const content = await fs.readFile(promptPath, 'utf-8');
-        this.promptCache.set(role, content);
-      } catch (error) {
-        console.error(`Failed to load prompt for ${role}:`, error);
-        throw new FrameworkError(
-          `Failed to load prompt for ${role}`,
-          'PROMPT_LOAD_ERROR',
-          500
-        );
-      }
-    }
-  }
-
-  async createAgent(
-    role: AgentRole,
-    name: string,
-    projectId: string,
-    providerId?: string
-  ): Promise<BaseAgent> {
-    const systemPrompt = await this.getSystemPrompt(role);
-
-    // Create the agent record in the database
+  async createAgent(config: AgentConfig): Promise<BaseAgent> {
+    // Create agent record in database
     const agent = await this.prisma.agent.create({
       data: {
-        name,
-        role,
-        provider: providerId || config.llm.defaultProvider,
-        systemPrompt,
-        project: {
-          connect: {
-            id: projectId,
-          },
-        },
+        name: config.name,
+        role: config.role,
+        projectId: config.projectId,
+        provider: config.provider,
+        model: config.model,
+        systemPrompt: this.getSystemPrompt(config.role),
       },
     });
 
-    // Initialize the agent's state
-    await this.prisma.agentState.create({
+    // Create learning profile
+    await this.prisma.learningProfile.create({
       data: {
         agentId: agent.id,
-        context: '{}',
-        shortTerm: '[]',
-        longTerm: '[]',
       },
     });
 
-    // Create the appropriate agent instance
-    return this.instantiateAgent(agent.id, name, role, projectId);
+    // Create agent instance
+    return this.instantiateAgent(agent);
   }
 
-  async getAgent(agentId: string): Promise<BaseAgent> {
-    const agent = await this.prisma.agent.findUnique({
-      where: { id: agentId },
-    });
-
-    if (!agent) {
-      throw new FrameworkError('Agent not found', 'AGENT_NOT_FOUND', 404);
-    }
-
-    return this.instantiateAgent(agent.id, agent.name, agent.role as AgentRole, agent.projectId);
-  }
-
-  private async getSystemPrompt(role: AgentRole): Promise<string> {
-    const roleSlug = role.replace('_', '-');
-    const prompt = this.promptCache.get(roleSlug);
-
-    if (!prompt) {
-      throw new FrameworkError(
-        `No prompt found for role: ${role}`,
-        'PROMPT_NOT_FOUND',
-        500
-      );
-    }
-
-    return prompt;
-  }
-
-  private async instantiateAgent(
-    id: string,
-    name: string,
-    role: AgentRole,
-    projectId: string
-  ): Promise<BaseAgent> {
-    const llmProvider = await this.createLLMProvider();
-
-    const commonArgs = [
-      id,
-      name,
-      projectId,
-      this.prisma,
-      this.redis,
-      llmProvider,
-      this.chroma,
-    ] as const;
-
+  private getSystemPrompt(role: AgentRole): string {
     switch (role) {
       case 'project_manager':
-        return new ProjectManagerAgent(...commonArgs);
-
+        return 'You are a project manager responsible for coordinating the development team...';
       case 'architect':
-        return new ArchitectAgent(...commonArgs);
-
+        return 'You are a software architect responsible for system design and technical decisions...';
       case 'frontend_developer':
-        return new FrontendDeveloperAgent(...commonArgs);
-
+        return 'You are a frontend developer skilled in creating user interfaces...';
       case 'backend_developer':
-        return new BackendDeveloperAgent(...commonArgs);
-
+        return 'You are a backend developer skilled in server-side development...';
       case 'code_reviewer':
-        return new CodeReviewerAgent(...commonArgs);
-
+        return 'You are a code reviewer responsible for maintaining code quality...';
       case 'devops':
-        return new DevOpsAgent(...commonArgs);
-
+        return 'You are a DevOps engineer responsible for deployment and infrastructure...';
       case 'qa_engineer':
-        return new QAEngineerAgent(...commonArgs);
-
+        return 'You are a QA engineer responsible for testing and quality assurance...';
       default:
-        throw new FrameworkError(
-          `Unknown agent role: ${role}`,
-          'INVALID_AGENT_ROLE',
-          400
-        );
+        throw new Error(`Unknown agent role: ${role}`);
     }
   }
 
-  private async createLLMProvider(): Promise<LLMProvider> {
-    const provider = config.llm.defaultProvider;
-    const model = config.llm.defaultModel;
-
-    switch (provider) {
-      case 'claude':
-        if (!config.llm.claude.apiKey) {
-          throw new FrameworkError(
-            'Claude API key not configured',
-            'MISSING_API_KEY',
-            500
-          );
-        }
-        return new ClaudeProvider({
-          apiKey: config.llm.claude.apiKey,
-          modelName: model as any,
-        });
-
-      case 'openai':
-        if (!config.llm.openai.apiKey) {
-          throw new FrameworkError(
-            'OpenAI API key not configured',
-            'MISSING_API_KEY',
-            500
-          );
-        }
-        return new OpenAIProvider({
-          apiKey: config.llm.openai.apiKey,
-          modelName: model,
-        });
-
-      case 'openrouter':
-        if (!config.llm.openrouter.apiKey) {
-          throw new FrameworkError(
-            'OpenRouter API key not configured',
-            'MISSING_API_KEY',
-            500
-          );
-        }
-        return new OpenRouterProvider({
-          apiKey: config.llm.openrouter.apiKey,
-          modelName: model,
-        });
-
-      case 'ollama':
-        return new OllamaProvider({
-          modelName: model,
-          baseUrl: config.llm.ollama?.baseUrl,
-        });
-
+  private instantiateAgent(data: {
+    id: string;
+    name: string;
+    role: string;
+    projectId: string;
+    provider: string;
+    model: string;
+    systemPrompt: string;
+  }): BaseAgent {
+    switch (data.role) {
+      case 'project_manager':
+        return new ProjectManager(data, this.prisma, this.chroma, this.llm);
+      case 'architect':
+        return new Architect(data, this.prisma, this.chroma, this.llm);
+      case 'frontend_developer':
+        return new FrontendDeveloper(data, this.prisma, this.chroma, this.llm);
+      case 'backend_developer':
+        return new BackendDeveloper(data, this.prisma, this.chroma, this.llm);
+      case 'code_reviewer':
+        return new CodeReviewer(data, this.prisma, this.chroma, this.llm);
+      case 'devops':
+        return new DevOps(data, this.prisma, this.chroma, this.llm);
+      case 'qa_engineer':
+        return new QAEngineer(data, this.prisma, this.chroma, this.llm);
       default:
-        throw new FrameworkError(
-          `Unknown provider: ${provider}`,
-          'INVALID_PROVIDER',
-          400
-        );
+        throw new Error(`Unknown agent role: ${data.role}`);
     }
   }
 }

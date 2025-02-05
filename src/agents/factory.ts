@@ -16,9 +16,12 @@ import { OpenRouterProvider } from '../providers/openrouter';
 import { OllamaProvider } from '../providers/ollama';
 import { ChromaProvider } from '../providers/chroma';
 import { config } from '../config/env';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 export class AgentFactory {
   private chroma: ChromaProvider;
+  private promptCache: Map<string, string> = new Map();
 
   constructor(
     private prisma: PrismaClient,
@@ -29,6 +32,35 @@ export class AgentFactory {
 
   async initialize(): Promise<void> {
     await this.chroma.initialize();
+    await this.loadPrompts();
+  }
+
+  private async loadPrompts(): Promise<void> {
+    const promptsDir = path.join(process.cwd(), 'prompts');
+    const roles = [
+      'project-manager',
+      'architect',
+      'frontend-developer',
+      'backend-developer',
+      'code-reviewer',
+      'devops',
+      'qa-engineer',
+    ];
+
+    for (const role of roles) {
+      const promptPath = path.join(promptsDir, `${role}.md`);
+      try {
+        const content = await fs.readFile(promptPath, 'utf-8');
+        this.promptCache.set(role, content);
+      } catch (error) {
+        console.error(`Failed to load prompt for ${role}:`, error);
+        throw new FrameworkError(
+          `Failed to load prompt for ${role}`,
+          'PROMPT_LOAD_ERROR',
+          500
+        );
+      }
+    }
   }
 
   async createAgent(
@@ -37,13 +69,15 @@ export class AgentFactory {
     projectId: string,
     providerId?: string
   ): Promise<BaseAgent> {
+    const systemPrompt = await this.getSystemPrompt(role);
+
     // Create the agent record in the database
     const agent = await this.prisma.agent.create({
       data: {
         name,
         role,
         provider: providerId || config.llm.defaultProvider,
-        systemPrompt: this.getDefaultSystemPrompt(role),
+        systemPrompt,
         project: {
           connect: {
             id: projectId,
@@ -76,6 +110,21 @@ export class AgentFactory {
     }
 
     return this.instantiateAgent(agent.id, agent.name, agent.role as AgentRole, agent.projectId);
+  }
+
+  private async getSystemPrompt(role: AgentRole): Promise<string> {
+    const roleSlug = role.replace('_', '-');
+    const prompt = this.promptCache.get(roleSlug);
+
+    if (!prompt) {
+      throw new FrameworkError(
+        `No prompt found for role: ${role}`,
+        'PROMPT_NOT_FOUND',
+        500
+      );
+    }
+
+    return prompt;
   }
 
   private async instantiateAgent(
@@ -183,63 +232,6 @@ export class AgentFactory {
           'INVALID_PROVIDER',
           400
         );
-    }
-  }
-
-  private getDefaultSystemPrompt(role: AgentRole): string {
-    switch (role) {
-      case 'project_manager':
-        return `You are a Project Manager agent responsible for:
-- Coordinating team activities
-- Managing tasks and priorities
-- Ensuring project goals are met
-- Facilitating communication between agents`;
-
-      case 'architect':
-        return `You are an Architect agent responsible for:
-- Making high-level technical decisions
-- Designing system architecture
-- Ensuring technical consistency
-- Evaluating technical trade-offs
-- Providing architectural guidance`;
-
-      case 'frontend_developer':
-        return `You are a Frontend Developer agent responsible for:
-- Implementing user interfaces
-- Ensuring responsive design
-- Maintaining frontend code quality
-- Optimizing frontend performance`;
-
-      case 'backend_developer':
-        return `You are a Backend Developer agent responsible for:
-- Implementing server-side logic
-- Designing and maintaining APIs
-- Managing data models
-- Ensuring system performance`;
-
-      case 'code_reviewer':
-        return `You are a Code Reviewer agent responsible for:
-- Reviewing code changes
-- Ensuring code quality
-- Identifying potential issues
-- Suggesting improvements`;
-
-      case 'devops':
-        return `You are a DevOps agent responsible for:
-- Managing infrastructure
-- Setting up CI/CD pipelines
-- Monitoring system health
-- Ensuring system reliability`;
-
-      case 'qa_engineer':
-        return `You are a QA Engineer agent responsible for:
-- Testing system functionality
-- Writing and maintaining tests
-- Identifying bugs and issues
-- Ensuring quality standards`;
-
-      default:
-        return `You are an agent with role ${role}. Please await specific instructions.`;
     }
   }
 }

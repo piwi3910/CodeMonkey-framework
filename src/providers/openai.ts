@@ -1,12 +1,11 @@
 import OpenAI from 'openai';
-import { ChatOptions, ChatResponse, Message, ProviderConfig } from '../types';
+import { Message, ChatOptions, ChatResponse, ProviderConfig } from '../types';
 import { LLMProvider } from './base';
 
 export interface OpenAIConfig extends ProviderConfig {
-  modelName: string; // e.g., 'gpt-4', 'gpt-3.5-turbo'
+  modelName: string;
+  apiKey: string;
 }
-
-type OpenAIRole = 'system' | 'user' | 'assistant' | 'function';
 
 export class OpenAIProvider extends LLMProvider {
   private client: OpenAI;
@@ -14,9 +13,7 @@ export class OpenAIProvider extends LLMProvider {
   constructor(config: OpenAIConfig) {
     super(config);
     this.validateConfig();
-    this.client = new OpenAI({
-      apiKey: config.apiKey!,
-    });
+    this.client = new OpenAI({ apiKey: config.apiKey });
   }
 
   async chat(messages: Message[], options?: ChatOptions): Promise<ChatResponse> {
@@ -24,24 +21,33 @@ export class OpenAIProvider extends LLMProvider {
     this.validateOptions(options);
 
     try {
-      const response = await this.client.chat.completions.create({
+      const completion = await this.client.chat.completions.create({
         model: this.config.modelName,
-        messages: this.convertToOpenAIMessages(messages),
+        messages: this.convertMessages(messages),
         temperature: options?.temperature,
         max_tokens: options?.maxTokens,
+        stop: options?.stopSequences,
         functions: options?.functions,
         function_call: options?.functionCall,
-        stream: false,
       });
 
+      const choice = completion.choices[0];
+      if (!choice || !choice.message) {
+        throw new Error('No response from OpenAI');
+      }
+
       return {
-        id: response.id,
-        content: response.choices[0].message.content || '',
+        id: completion.id,
+        content: choice.message.content || '',
         usage: {
-          promptTokens: response.usage?.prompt_tokens || 0,
-          completionTokens: response.usage?.completion_tokens || 0,
-          totalTokens: response.usage?.total_tokens || 0,
+          promptTokens: completion.usage?.prompt_tokens || 0,
+          completionTokens: completion.usage?.completion_tokens || 0,
+          totalTokens: completion.usage?.total_tokens || 0,
         },
+        functionCall: choice.message.function_call ? {
+          name: choice.message.function_call.name,
+          arguments: choice.message.function_call.arguments || '',
+        } : undefined,
       };
     } catch (error) {
       throw this.handleError(error);
@@ -58,93 +64,79 @@ export class OpenAIProvider extends LLMProvider {
     try {
       const stream = await this.client.chat.completions.create({
         model: this.config.modelName,
-        messages: this.convertToOpenAIMessages(messages),
+        messages: this.convertMessages(messages),
         temperature: options?.temperature,
         max_tokens: options?.maxTokens,
+        stop: options?.stopSequences,
         functions: options?.functions,
         function_call: options?.functionCall,
         stream: true,
       });
 
+      let id = '';
+      let content = '';
+      let functionCallName = '';
+      let functionCallArgs = '';
+
       for await (const chunk of stream) {
-        if (chunk.choices[0]?.delta?.content) {
-          yield {
-            id: chunk.id,
-            content: chunk.choices[0].delta.content,
-            usage: {
-              promptTokens: 0,
-              completionTokens: 0,
-              totalTokens: 0,
-            },
-          };
+        id = chunk.id;
+        const delta = chunk.choices[0]?.delta;
+
+        if (delta?.content) {
+          content += delta.content;
         }
+
+        if (delta?.function_call) {
+          if (delta.function_call.name) {
+            functionCallName = delta.function_call.name;
+          }
+          if (delta.function_call.arguments) {
+            functionCallArgs += delta.function_call.arguments;
+          }
+        }
+
+        yield {
+          id,
+          content,
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+          },
+          functionCall: functionCallName
+            ? {
+                name: functionCallName,
+                arguments: functionCallArgs,
+              }
+            : undefined,
+        };
       }
     } catch (error) {
       throw this.handleError(error);
     }
   }
 
-  private convertToOpenAIMessages(
-    messages: Message[]
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    return messages.map((msg): OpenAI.Chat.ChatCompletionMessageParam => {
-      const role = this.convertRole(msg.role);
-
-      switch (role) {
-        case 'function':
-          return {
-            role,
-            content: msg.content,
-            name: msg.name || 'unknown_function',
-          };
-        case 'assistant':
-          if (msg.functionCall) {
-            return {
-              role,
-              content: msg.content,
-              function_call: {
-                name: msg.functionCall.name,
-                arguments: JSON.stringify(msg.functionCall.arguments),
-              },
-            };
-          }
-          return {
-            role,
-            content: msg.content,
-          };
-        case 'system':
-        case 'user':
-          return {
-            role,
-            content: msg.content,
-          };
-        default:
-          return {
-            role: 'user',
-            content: msg.content,
-          };
-      }
-    });
+  private convertMessages(messages: Message[]): any[] {
+    return messages.map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+      name: msg.name,
+      function_call: msg.function_call,
+    }));
   }
 
-  private convertRole(role: string): OpenAIRole {
-    switch (role) {
-      case 'system':
-      case 'user':
-      case 'assistant':
-      case 'function':
-        return role as OpenAIRole;
-      default:
-        return 'user'; // Default to user for unknown roles
+  private validateConfig(): void {
+    if (!this.config.apiKey) {
+      throw new Error('OpenAI API key is required');
+    }
+    if (!this.config.modelName) {
+      throw new Error('OpenAI model name is required');
     }
   }
 
   private handleError(error: unknown): Error {
-    if (error instanceof OpenAI.APIError) {
-      return new Error(`OpenAI API error: ${error.message}`);
-    }
     if (error instanceof Error) {
-      return error;
+      return new Error(`OpenAI API error: ${error.message}`);
     }
     return new Error('Unknown error occurred');
   }

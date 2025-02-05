@@ -1,127 +1,109 @@
-// This is your Prisma schema file
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// Project and Agent Models
 model Project {
   id          String   @id @default(uuid())
   name        String
   description String
-  repository  String?
-  status      String   // planning, in_progress, review, completed, archived
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-
   agents      Agent[]
   tasks       Task[]
   context     ProjectContext?
-  conversations Conversation[]
-
-  @@map("projects")
 }
 
 model Agent {
-  id           String   @id @default(uuid())
-  name         String
-  role         String   // project_manager, architect, frontend_developer, etc.
-  provider     String   // LLM provider identifier
-  systemPrompt String   // System prompt for the agent
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectId    String
-  state        AgentState?
-  messages     Message[]
-  tasks        Task[]   // Tasks assigned to this agent
-
-  @@map("agents")
+  id            String       @id @default(uuid())
+  name          String
+  role          String
+  provider      String
+  systemPrompt  String
+  projectId     String
+  project       Project      @relation(fields: [projectId], references: [id])
+  tasks         Task[]
+  state         AgentState?
+  learningProfile LearningProfile?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 }
 
 model AgentState {
-  id           String   @id @default(uuid())
-  currentTask  String?
-  context      String   // JSON stringified context
-  shortTerm    String   // JSON stringified recent messages
-  longTerm     String   // JSON stringified important information
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  agentId      String   @unique
-
-  @@map("agent_states")
+  id        String   @id @default(uuid())
+  agentId   String   @unique
+  agent     Agent    @relation(fields: [agentId], references: [id])
+  context   String   @default("{}")
+  shortTerm String   @default("[]")
+  longTerm  String   @default("[]")
+  updatedAt DateTime @updatedAt
 }
 
 model Task {
-  id          String   @id @default(uuid())
-  title       String
-  description String
-  status      String   // pending, in_progress, review, completed, blocked
-  priority    String   // low, medium, high, critical
-  dependencies String  @default("[]") // JSON stringified array of task IDs
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectId   String
-  agent       Agent?   @relation(fields: [agentId], references: [id])
-  agentId     String?
-
-  @@map("tasks")
+  id           String      @id @default(uuid())
+  title        String
+  description  String
+  status       String
+  priority     String
+  dependencies String
+  projectId    String
+  project      Project     @relation(fields: [projectId], references: [id])
+  agentId      String?
+  agent        Agent?      @relation(fields: [agentId], references: [id])
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 }
 
 model ProjectContext {
-  id          String   @id @default(uuid())
-  files       String   // JSON stringified array
-  dependencies String  // JSON stringified object
-  architecture String  // JSON stringified object
-  technical   String   // JSON stringified array
-  requirements String  // JSON stringified array
-  design      String   // JSON stringified array
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectId   String   @unique
-
-  @@map("project_contexts")
+  id            String   @id @default(uuid())
+  projectId     String   @unique
+  project       Project  @relation(fields: [projectId], references: [id])
+  architecture  String   @default("{}")
+  technical     String   @default("{}")
+  requirements  String   @default("{}")
+  dependencies  String   @default("{}")
+  updatedAt     DateTime @updatedAt
 }
 
-model Conversation {
-  id          String   @id @default(uuid())
-  title       String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectId   String
-  messages    Message[]
-
-  @@map("conversations")
+// Learning System Models
+model LearningProfile {
+  id              String            @id @default(uuid())
+  agentId         String           @unique
+  agent           Agent            @relation(fields: [agentId], references: [id])
+  totalTasks      Int              @default(0)
+  successfulTasks Int              @default(0)
+  failedTasks     Int              @default(0)
+  averageMetrics  String           @default("{}")
+  learningRate    Float            @default(1)
+  lastUpdated     DateTime         @default(now())
+  skills          LearningSkill[]
+  specializations LearningSpecialization[]
+  metrics         LearningMetric[]
 }
 
-model Message {
-  id          String   @id @default(uuid())
-  role        String   // system, user, assistant, function
-  content     String   // Message content
-  name        String?
-  functionCall String? // JSON stringified function call
-  createdAt   DateTime @default(now())
-
-  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  conversationId String?
-  agent        Agent?    @relation(fields: [agentId], references: [id])
-  agentId      String?
-
-  @@map("messages")
+model LearningSkill {
+  id        String          @id @default(uuid())
+  profileId String
+  profile   LearningProfile @relation(fields: [profileId], references: [id])
+  data      String
 }
 
-// Vector store references will be managed in ChromaDB
-// Cache entries will be managed in Redis
+model LearningSpecialization {
+  id        String          @id @default(uuid())
+  profileId String
+  profile   LearningProfile @relation(fields: [profileId], references: [id])
+  data      String
+}
+
+model LearningMetric {
+  id        String          @id @default(uuid())
+  profileId String
+  profile   LearningProfile @relation(fields: [profileId], references: [id])
+  data      String
+  timestamp DateTime        @default(now())
+}

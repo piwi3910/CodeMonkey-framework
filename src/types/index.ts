@@ -1,60 +1,4 @@
-// Core message types
-export interface Message {
-  role: 'system' | 'user' | 'assistant' | 'function';
-  content: string;
-  name?: string;
-  functionCall?: FunctionCall;
-}
-
-export interface FunctionCall {
-  name: string;
-  arguments: string;
-}
-
-// LLM Provider types
-export interface ProviderConfig {
-  apiKey?: string;
-  baseUrl?: string;
-  organizationId?: string;
-  modelName: string;
-}
-
-export interface ChatOptions {
-  temperature?: number;
-  maxTokens?: number;
-  stopSequences?: string[];
-  functions?: FunctionDefinition[];
-  functionCall?: 'auto' | 'none' | { name: string };
-  stream?: boolean;
-}
-
-export interface FunctionDefinition {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
-
-export interface ChatResponse {
-  id: string;
-  content: string;
-  functionCall?: FunctionCall;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
-
-// Agent types
-export interface Agent {
-  id: string;
-  name: string;
-  role: AgentRole;
-  provider: string;
-  systemPrompt: string;
-  state: AgentState;
-}
-
+// Agent Types
 export type AgentRole =
   | 'project_manager'
   | 'architect'
@@ -64,17 +8,18 @@ export type AgentRole =
   | 'devops'
   | 'qa_engineer';
 
-export interface AgentState {
-  currentTask?: string;
-  context: Record<string, unknown>;
-  memory: {
-    shortTerm: Message[];
-    longTerm: Message[];
+export interface Message {
+  role: 'system' | 'user' | 'assistant' | 'function';
+  content: string;
+  name?: string;
+  function_call?: {
+    name: string;
+    arguments?: string;
   };
 }
 
-// Task types
-export type TaskStatus = 'pending' | 'assigned' | 'in_progress' | 'review' | 'completed' | 'blocked';
+// Task Types
+export type TaskStatus = 'pending' | 'assigned' | 'in_progress' | 'completed' | 'failed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
 
 export interface Task {
@@ -85,100 +30,174 @@ export interface Task {
   priority: TaskPriority;
   dependencies: string[];
   projectId: string;
-  agentId?: string | null;
-  createdAt: Date;
+  agentId: string | null | undefined;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// Agent State Types
+export interface AgentState {
+  id: string;
+  agentId: string;
+  context: string;
+  shortTerm: string;
+  longTerm: string;
   updatedAt: Date;
 }
 
-// Project types
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  repository?: string;
-  status: ProjectStatus;
-  agents: Agent[];
-  tasks: Task[];
-  context: ProjectContext;
-}
-
-export type ProjectStatus = 'planning' | 'in_progress' | 'review' | 'completed' | 'archived';
-
-export interface ProjectContext {
-  codebase: {
-    files: string[];
-    dependencies: Record<string, string>;
-    architecture: Record<string, unknown>;
-  };
-  documentation: {
-    technical: string[];
-    requirements: string[];
-    design: string[];
-  };
-  vectorIndexes: {
-    code: string;
-    docs: string;
-    conversations: string;
-  };
-}
-
-// API types
-export interface ApiRequest {
-  messages: Message[];
-  functions?: FunctionDefinition[];
-  functionCall?: 'auto' | 'none' | { name: string };
-  stream?: boolean;
-  temperature?: number;
-  maxTokens?: number;
-}
-
-export interface ApiResponse {
-  id: string;
-  object: 'chat.completion';
-  created: number;
-  model: string;
-  choices: {
-    index: number;
-    message: Message;
-    finishReason: 'stop' | 'length' | 'function_call';
-  }[];
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
-
-// Error types
+// Error Types
 export class FrameworkError extends Error {
   constructor(
     message: string,
     public code: string,
-    public status: number = 500,
-    public details?: Record<string, unknown>
+    public statusCode: number
   ) {
     super(message);
     this.name = 'FrameworkError';
   }
 }
 
-export class ValidationError extends FrameworkError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super(message, 'VALIDATION_ERROR', 400, details);
-    this.name = 'ValidationError';
-  }
+// Documentation Types
+export type DocumentationType = 
+  | 'api' 
+  | 'architecture' 
+  | 'technical' 
+  | 'design'
+  | 'learning_event'
+  | 'skill_data'
+  | 'agent_profile'
+  | 'memory'
+  | 'code'
+  | 'test'
+  | 'metric'
+  | 'documentation';
+
+export interface DocumentationMetadata {
+  projectId: string;
+  type: DocumentationType;
+  title: string;
+  timestamp: string;
+  agentId?: string;
+  category?: string;
+  version?: string;
+  tags?: string[];
 }
 
-export class AuthenticationError extends FrameworkError {
-  constructor(message: string) {
-    super(message, 'AUTHENTICATION_ERROR', 401);
-    this.name = 'AuthenticationError';
-  }
+// Provider Types
+export interface ProviderConfig {
+  apiKey?: string;
+  modelName: string;
+  baseUrl?: string;
 }
 
-export class AuthorizationError extends FrameworkError {
-  constructor(message: string) {
-    super(message, 'AUTHORIZATION_ERROR', 403);
-    this.name = 'AuthorizationError';
-  }
+export interface ChatOptions {
+  temperature?: number;
+  maxTokens?: number;
+  stopSequences?: string[];
+  functions?: any[];
+  functionCall?: 'auto' | 'none' | { name: string };
+}
+
+export interface ChatResponse {
+  id: string;
+  content: string;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  functionCall?: {
+    name: string;
+    arguments: string;
+  };
+}
+
+// Memory Types
+export interface Memory {
+  id: string;
+  content: string;
+  type: 'shortTerm' | 'longTerm';
+  timestamp: Date;
+  metadata: {
+    source: string;
+    context?: string;
+    importance?: number;
+    category?: string;
+  };
+}
+
+// Context Types
+export interface AgentContext {
+  currentTask?: {
+    id: string;
+    title: string;
+    description: string;
+  };
+  recentMemories: Memory[];
+  projectContext: {
+    architecture?: string;
+    technical?: string;
+    requirements?: string;
+  };
+  customContext?: Record<string, any>;
+}
+
+// Project Types
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  agents: {
+    id: string;
+    name: string;
+    role: AgentRole;
+  }[];
+  tasks: Task[];
+  context?: {
+    architecture: string;
+    technical: string;
+    requirements: string;
+    dependencies: string;
+  };
+}
+
+// Monitoring Types
+export interface PerformanceMetrics {
+  responseTime: number;
+  tokenUsage: number;
+  memoryUsage: number;
+  taskSuccess: boolean;
+  errorCount: number;
+  timestamp: Date;
+}
+
+export interface SystemHealth {
+  status: 'healthy' | 'degraded' | 'failing';
+  components: {
+    name: string;
+    status: 'up' | 'down' | 'degraded';
+    lastCheck: Date;
+    metrics?: Record<string, number>;
+  }[];
+  lastUpdated: Date;
+}
+
+// Function Calling Types
+export interface FunctionDefinition {
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, {
+      type: string;
+      description: string;
+      enum?: string[];
+    }>;
+    required?: string[];
+  };
+}
+
+export interface FunctionCall {
+  name: string;
+  arguments: string;
 }

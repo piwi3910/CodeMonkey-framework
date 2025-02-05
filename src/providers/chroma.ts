@@ -1,5 +1,6 @@
-import { ChromaClient, Collection, OpenAIEmbeddingFunction, QueryResponse, Metadata } from 'chromadb';
+import { ChromaClient, Collection, OpenAIEmbeddingFunction, QueryResponse } from 'chromadb';
 import { config } from '../config/env';
+import { DocumentationType } from '../types';
 
 interface Document {
   id: string;
@@ -38,7 +39,6 @@ export class ChromaProvider {
   }
 
   async initialize(): Promise<void> {
-    // Initialize default collections
     await this.getCollection('code');
     await this.getCollection('memory');
     await this.getCollection('documentation');
@@ -197,9 +197,13 @@ export class ChromaProvider {
     content: string,
     metadata: {
       projectId: string;
-      type: 'api' | 'architecture' | 'technical' | 'design';
+      type: DocumentationType;
       title: string;
       timestamp: string;
+      agentId?: string;
+      category?: string;
+      version?: string;
+      tags?: string[];
     }
   ): Promise<void> {
     await this.addDocuments('documentation', [
@@ -215,8 +219,10 @@ export class ChromaProvider {
     query: string,
     options: {
       projectId: string;
-      type?: 'api' | 'architecture' | 'technical' | 'design';
+      type?: DocumentationType;
       nResults?: number;
+      category?: string;
+      tags?: string[];
     }
   ): Promise<Document[]> {
     const where: Record<string, any> = {
@@ -225,6 +231,14 @@ export class ChromaProvider {
 
     if (options.type) {
       where.type = options.type;
+    }
+
+    if (options.category) {
+      where.category = options.category;
+    }
+
+    if (options.tags) {
+      where.tags = { $in: options.tags };
     }
 
     return this.queryDocuments('documentation', query, {

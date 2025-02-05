@@ -15,9 +15,17 @@ export class ChromaProvider {
   private collections: Map<CollectionName, Collection> = new Map();
 
   constructor() {
-    this.client = new ChromaClient({
-      path: `http://${config.chromadb.host}:${config.chromadb.port}`,
-    });
+    const url = `http${config.chromadb.tls ? 's' : ''}://${config.chromadb.host}:${config.chromadb.port}`;
+    const options: { path: string; auth?: { provider: string; credentials: string } } = { path: url };
+
+    if (config.chromadb.apiKey) {
+      options.auth = {
+        provider: 'token',
+        credentials: config.chromadb.apiKey,
+      };
+    }
+
+    this.client = new ChromaClient(options);
 
     if (!config.llm.openai.apiKey) {
       throw new Error('OpenAI API key is required for embeddings');

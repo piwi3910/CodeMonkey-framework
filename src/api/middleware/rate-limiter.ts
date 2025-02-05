@@ -2,7 +2,12 @@ import { Request, Response, NextFunction } from 'express';
 import { Redis } from 'ioredis';
 import { config } from '../../config/env';
 
-const redis = new Redis(config.redis.url);
+const redis = new Redis({
+  host: config.redis.host,
+  port: config.redis.port,
+  password: config.redis.password,
+  tls: config.redis.tls ? {} : undefined,
+});
 
 // Rate limit settings
 const WINDOW_SIZE_IN_SECONDS = 60; // 1 minute
